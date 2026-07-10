@@ -7,3 +7,8 @@ panel_preview*.png
 
 # Persönliches / Portfolio-Material (nicht Teil des öffentlichen Projekts)
 website/
+
+# PyInstaller-Build (die .exe gehört in GitHub-Releases, nicht ins Repo)
+build/
+dist/
+*.spec

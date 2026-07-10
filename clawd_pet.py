@@ -909,7 +909,7 @@ class PetWidget(QWidget):
         else:
             self.setToolTip(
                 f"Claude-Nutzung (Schätzung): {fmt_pct_de(snap.pct)}  "
-                f"({fmt_de(snap.total)} / {fmt_de(effective_max_tokens())} Tokens)"
+                f"({fmt_de(snap.total)} Tokens verbraucht)"
             )
 
     def set_pct(self, pct: float):
@@ -1276,7 +1276,7 @@ class PanelWidget(QWidget):
             hint = ("Limit kalibriert" if is_calibrated() else
                     "Platzhalter-Limit – im Tray-Menü kalibrieren")
             self.detail_label.setText(
-                f"{fmt_de(snap.total)} / {fmt_de(effective_max_tokens())} Tokens · {hint}")
+                f"{fmt_de(snap.total)} Tokens verbraucht (Input + Output) · {hint}")
         self.detail_label.setVisible(bool(self.detail_label.text()))
         if snap.updated_at:
             src = "live" if snap.source == "api" else "lokal"
@@ -1546,7 +1546,7 @@ class ClawdApp:
             else:
                 self.tray.setToolTip(
                     f"Clawd – {fmt_pct_de(snap.pct)}  "
-                    f"({fmt_de(snap.total)} / {fmt_de(effective_max_tokens())} Tokens)")
+                    f"({fmt_de(snap.total)} Tokens verbraucht)")
             self.tray.setIcon(make_app_icon(mood_for_pct(snap.pct)))
 
     # -------------------------------------------------- panel control

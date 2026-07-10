@@ -20,6 +20,23 @@ den Python-Launcher), nimm `py -m pip install -r requirements.txt` und
 `py clawd_pet.py` — oder einfach **Doppelklick auf `start_clawd.bat`**, das
 startet Clawd ohne Konsolenfenster.
 
+### Ohne Python: fertige .exe (Windows)
+
+Unter **Releases** liegt eine eigenständige `ClawdPet.exe` — herunterladen,
+doppelklicken, fertig. Kein Python nötig.
+
+> Hinweis: Die exe ist mit PyInstaller gebaut und unsigniert; Windows
+> SmartScreen fragt beim ersten Start eventuell nach („Weitere Informationen"
+> → „Trotzdem ausführen").
+
+Selbst bauen:
+
+```powershell
+py -m pip install pyinstaller
+py -m PyInstaller --onefile --windowed --name ClawdPet --add-data "sprites;sprites" clawd_pet.py
+# Ergebnis: dist/ClawdPet.exe
+```
+
 Optional headless smoke test (scans your logs, renders every mood offscreen):
 
 ```bash

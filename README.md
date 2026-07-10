@@ -1,4 +1,4 @@
-# Clawd — Claude Code Desktop Pet 🐾☁️
+# Clawd — Claude Code Desktop Pet
 
 **English** · [Deutsch](README.de.md)
 

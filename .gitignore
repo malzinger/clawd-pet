@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.pyc
+
+# Selftest-Artefakte (werden bei jedem --selftest neu erzeugt)
+panel_preview*.png
+
+# Persönliches / Portfolio-Material (nicht Teil des öffentlichen Projekts)
+website/

@@ -1,4 +1,4 @@
-# Clawd — Claude Code Desktop Pet 🐾☁️
+# Clawd — Claude Code Desktop Pet 
 
 A tiny, always-on-top desktop widget that renders **Clawd**, the pixel-art
 mascot of Claude Code, and live-tracks your Claude Code token usage from the

@@ -28,6 +28,13 @@ python clawd_pet.py
 Unter Windows `py` statt `python`, falls Python nicht im PATH liegt — oder
 einfach Doppelklick auf `start_clawd.bat` (startet ohne Konsolenfenster).
 
+Die eigenständige exe selbst bauen:
+
+```bash
+pip install pyinstaller
+python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ico" --add-data "sprites;sprites" clawd_pet.py
+```
+
 ## Clawds Stimmungen
 
 | Auslastung      | Stimmung   | Was du siehst                       |

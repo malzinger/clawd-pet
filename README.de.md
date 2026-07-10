@@ -10,8 +10,11 @@ in Panik.
 
 ## Schnellstart (Windows — kein Python nötig)
 
-1. **ClawdPet.exe** vom [neuesten Release](https://github.com/malzinger/clawd-pet/releases/latest) herunterladen
+1. **[ClawdPet.exe](https://github.com/malzinger/clawd-pet/releases/latest/download/ClawdPet.exe)** herunterladen (Direktlink)
 2. Doppelklicken. Fertig — Clawd erscheint auf deinem Desktop.
+
+> Hinweis: Der grüne „Code → Download ZIP"-Button enthält nur den Quellcode —
+> die exe liegt unter [Releases](https://github.com/malzinger/clawd-pet/releases).
 
 > Die exe ist unsigniert, Windows SmartScreen warnt eventuell beim ersten
 > Start: „Weitere Informationen" → „Trotzdem ausführen".

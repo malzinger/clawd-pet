@@ -387,23 +387,54 @@ def fetch_api_usage() -> Optional[list]:
     if not isinstance(data, dict):
         return None
     buckets = []
-    for key, val in data.items():
-        if not isinstance(val, dict):
-            continue
-        util = val.get("utilization")
-        if not isinstance(util, (int, float)):
-            continue
-        pct = float(util)
-        if isinstance(util, float) and 0.0 <= util <= 1.0:
-            pct *= 100.0          # some deployments report a 0..1 fraction
-        resets = val.get("resets_at")
-        if isinstance(resets, (int, float)):
-            resets_at = datetime.fromtimestamp(resets, tz=timezone.utc)
-        else:
-            resets_at = _parse_iso_ts(resets)
-        label = BUCKET_LABELS.get(
-            key, key.replace("seven_day_", "Wöchentlich · ").replace("_", " ").title())
-        buckets.append(UsageBucket(key=key, label=label, pct=pct, resets_at=resets_at))
+
+    # Preferred source: the "limits" array — it is what Claude's own usage
+    # popup renders, incl. model-scoped weekly limits ("Wöchentlich · Fable").
+    limits = data.get("limits")
+    if isinstance(limits, list):
+        for lim in limits:
+            if not isinstance(lim, dict):
+                continue
+            pct = lim.get("percent")
+            if not isinstance(pct, (int, float)):
+                continue
+            kind = str(lim.get("kind") or "")
+            scope = lim.get("scope") if isinstance(lim.get("scope"), dict) else {}
+            model = scope.get("model") if isinstance(scope.get("model"), dict) else {}
+            display = model.get("display_name")
+            if kind == "session":
+                key, label = "five_hour", "5-Stunden-Limit"
+            elif kind == "weekly_all":
+                key, label = "seven_day", "Wöchentlich · alle Modelle"
+            elif isinstance(display, str) and display:
+                key, label = f"weekly_{display.lower()}", f"Wöchentlich · {display}"
+            else:
+                key = kind or "unknown"
+                label = (kind or "Limit").replace("_", " ").title()
+            buckets.append(UsageBucket(
+                key=key, label=label, pct=float(pct),
+                resets_at=_parse_iso_ts(lim.get("resets_at"))))
+
+    # Fallback: older top-level bucket format {name: {utilization, resets_at}}
+    if not buckets:
+        for key, val in data.items():
+            if not isinstance(val, dict):
+                continue
+            util = val.get("utilization")
+            if not isinstance(util, (int, float)):
+                continue
+            pct = float(util)
+            if isinstance(util, float) and 0.0 <= util <= 1.0:
+                pct *= 100.0      # some deployments report a 0..1 fraction
+            resets = val.get("resets_at")
+            if isinstance(resets, (int, float)):
+                resets_at = datetime.fromtimestamp(resets, tz=timezone.utc)
+            else:
+                resets_at = _parse_iso_ts(resets)
+            label = BUCKET_LABELS.get(
+                key, key.replace("seven_day_", "Wöchentlich · ").replace("_", " ").title())
+            buckets.append(UsageBucket(key=key, label=label, pct=pct, resets_at=resets_at))
+
     order = {"five_hour": 0, "seven_day": 1}
     buckets.sort(key=lambda b: order.get(b.key, 2))
     return buckets or None
@@ -414,7 +445,11 @@ def collect_usage(should_stop=None) -> UsageSnapshot:
     if USE_API_USAGE:
         buckets = fetch_api_usage()
         if buckets:
-            snap = UsageSnapshot(updated_at=datetime.now())
+            # keep the local per-model token counts as extra detail
+            snap = scan_usage(should_stop=should_stop)
+            if snap.error:
+                snap = UsageSnapshot(updated_at=datetime.now())
+            snap.error = ""
             snap.source = "api"
             snap.buckets = buckets
             five = next((b for b in buckets if b.key == "five_hour"), buckets[0])
@@ -1252,7 +1287,14 @@ class PanelWidget(QWidget):
             for b in snap.buckets:
                 self._animate_row(self._ensure_row(b.key, b.label), b.pct)
             self._show_only({b.key for b in snap.buckets})
-            self.detail_label.setText("")
+            models = sorted(
+                ((n, t) for n, t in snap.by_model.items() if n != "System" and t > 0),
+                key=lambda kv: -kv[1])
+            if models:
+                parts = " · ".join(f"{n} {fmt_de(t)}" for n, t in models)
+                self.detail_label.setText(f"Lokal gezählt (5-h-Fenster): {parts} Tokens")
+            else:
+                self.detail_label.setText("")
         else:
             row = self._ensure_row("estimate", "5-Stunden-Limit")
             self._animate_row(row, snap.pct)

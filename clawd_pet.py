@@ -36,6 +36,7 @@ import json
 import math
 import os
 import random
+import shutil
 import sys
 import time
 import urllib.error
@@ -74,6 +75,7 @@ from PyQt5.QtGui import (
     QPen,
     QPixmap,
 )
+from PyQt5.QtNetwork import QHostAddress, QUdpSocket
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
@@ -121,9 +123,17 @@ SPRITE_FILES = {
     "sleep": "clawd-sleeping.gif",   # no activity in the rolling window
     "chill": "clawd-idle.gif",
     "focus": "clawd-building.gif",
+    "happy": "clawd-happy.gif",      # turn finished / waiting for your input
     "panic": "clawd-debugger.gif",
     "limit": "clawd-error.gif",
 }
+
+# --- Real-time activity (Stufe 1: log watcher, Stufe 2: opt-in hooks) -------
+ACTIVITY_POLL_MS = 1500     # how often the newest session log is checked
+ACTIVITY_IDLE_S = 240       # log untouched this long -> no activity
+HOOK_UDP_PORT = 52741       # clawd_hook.py sends Claude Code events here
+CLAUDE_SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
+HOOK_EVENTS = ["PreToolUse", "Notification", "Stop", "SessionStart"]
 
 # --- Optional live sync with the Anthropic usage endpoint -------------------
 # Read-only, best effort: if ~/.claude/.credentials.json holds a *currently
@@ -161,6 +171,7 @@ class UsageSnapshot:
     source: str = "logs"                          # "api" (live) or "logs" (estimate)
     buckets: list = field(default_factory=list)   # list[UsageBucket] in api mode
     by_model: dict = field(default_factory=dict)  # model id -> input+output tokens
+    newest_file: str = ""                         # most recently written session log
 
 
 _MAX_TOKENS_OVERRIDE: Optional[int] = None      # set once calibrated
@@ -245,6 +256,7 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
 
     by_msg_id = {}
     anonymous = []
+    newest_mtime = datetime.min.replace(tzinfo=timezone.utc)
 
     try:
         files = list(CLAUDE_PROJECTS_DIR.rglob("*.jsonl"))
@@ -261,6 +273,9 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
             continue
         if mtime < cutoff:
             continue  # file untouched since before the window — nothing new inside
+        if mtime > newest_mtime:
+            newest_mtime = mtime
+            snap.newest_file = str(fp)
         snap.files_scanned += 1
         try:
             with open(fp, "r", encoding="utf-8", errors="replace") as fh:
@@ -472,6 +487,168 @@ def _fmt_reset(resets_at: Optional[datetime]) -> str:
     local = resets_at.astimezone()
     wd = ("Mo.", "Di.", "Mi.", "Do.", "Fr.", "Sa.", "So.")[local.weekday()]
     return f"Zurücksetzung {wd}, {local.strftime('%H:%M')}"
+
+
+# ======================================================================
+#  Real-time activity — Stufe 1: watch the newest session log's tail
+# ======================================================================
+
+TOOL_BUBBLES = {
+    "Read": "liest Dateien …",
+    "Edit": "schreibt Code …",
+    "Write": "schreibt Code …",
+    "MultiEdit": "schreibt Code …",
+    "NotebookEdit": "schreibt Code …",
+    "Bash": "führt Befehle aus …",
+    "PowerShell": "führt Befehle aus …",
+    "Grep": "durchsucht den Code …",
+    "Glob": "durchsucht den Code …",
+    "Task": "delegiert an Agenten …",
+    "Agent": "delegiert an Agenten …",
+    "WebFetch": "surft im Web …",
+    "WebSearch": "surft im Web …",
+}
+
+
+def read_last_activity(path: Path, now: Optional[datetime] = None):
+    """Inspect the tail of a session log.
+
+    Returns ("working", tool_name_or_None), ("waiting", None) — Claude has
+    finished its turn — or None when the log has gone quiet.
+    """
+    if path is None:
+        return None
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    now_ts = (now or datetime.now(timezone.utc)).timestamp()
+    if now_ts - mtime > ACTIVITY_IDLE_S:
+        return None
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - 32768))
+            tail = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue                      # first line may be cut by the seek
+        if not isinstance(rec, dict):
+            continue
+        rtype = rec.get("type")
+        msg = rec.get("message") if isinstance(rec.get("message"), dict) else None
+        if rtype == "assistant" and msg:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        return ("working", block.get("name"))
+            return ("waiting", None)      # spoke without tools -> turn is over
+        if rtype == "user":
+            return ("working", None)      # tool result arrived, Claude thinks
+    return None
+
+
+# ======================================================================
+#  Real-time activity — Stufe 2: opt-in Claude Code hooks
+#  (clawd_hook.py sends events via UDP; registration lives in
+#   ~/.claude/settings.json and is only touched from the tray menu.)
+# ======================================================================
+
+def hook_command() -> Optional[str]:
+    """Command line for the Claude Code hook, or None if unavailable."""
+    if getattr(sys, "frozen", False):
+        src = Path(getattr(sys, "_MEIPASS", "")) / "clawd_hook.py"
+        dst = Path.home() / ".claude" / "clawd_hook.py"
+        try:
+            shutil.copy2(src, dst)
+        except OSError:
+            return None
+        hook_py = dst
+    else:
+        hook_py = Path(__file__).resolve().parent / "clawd_hook.py"
+        if not hook_py.is_file():
+            return None
+    runner = (shutil.which("pythonw") or shutil.which("pyw")
+              or shutil.which("python") or shutil.which("py"))
+    if not runner:
+        return None
+    return f'"{runner}" "{hook_py}"'
+
+
+def _load_settings(settings_path: Path):
+    try:
+        if settings_path.exists():
+            return json.loads(settings_path.read_text(encoding="utf-8"))
+        return {}
+    except (OSError, ValueError):
+        return None
+
+
+def _write_settings(settings_path: Path, data: dict) -> bool:
+    try:
+        if settings_path.exists():
+            shutil.copy2(settings_path,
+                         settings_path.with_suffix(".json.clawd-bak"))
+        tmp = settings_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp.replace(settings_path)
+        return True
+    except OSError:
+        return False
+
+
+def hooks_registered(settings_path: Path) -> bool:
+    data = _load_settings(settings_path)
+    if not isinstance(data, dict):
+        return False
+    return "clawd_hook.py" in json.dumps(data.get("hooks", {}))
+
+
+def register_hooks(settings_path: Path, command: str) -> bool:
+    data = _load_settings(settings_path)
+    if not isinstance(data, dict):
+        return False
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        return False
+    changed = False
+    for event in HOOK_EVENTS:
+        arr = hooks.setdefault(event, [])
+        if not isinstance(arr, list):
+            continue
+        if any("clawd_hook.py" in json.dumps(entry) for entry in arr):
+            continue
+        arr.append({"matcher": "",
+                    "hooks": [{"type": "command", "command": command}]})
+        changed = True
+    return changed and _write_settings(settings_path, data)
+
+
+def unregister_hooks(settings_path: Path) -> bool:
+    data = _load_settings(settings_path)
+    if not isinstance(data, dict):
+        return False
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    changed = False
+    for event, arr in hooks.items():
+        if not isinstance(arr, list):
+            continue
+        kept = [e for e in arr if "clawd_hook.py" not in json.dumps(e)]
+        if len(kept) != len(arr):
+            hooks[event] = kept
+            changed = True
+    return changed and _write_settings(settings_path, data)
 
 
 def mood_for_pct(pct: float) -> str:
@@ -888,10 +1065,14 @@ def make_app_icon(mood: str = "chill") -> QIcon:
 #  Pet widget — the always-on-top mascot
 # ======================================================================
 
+_HEART_ROWS = ("0110110", "1111111", "1111111", "0111110", "0011100", "0001000")
+
+
 class PetWidget(QWidget):
     ANIM_TICK_MS = 33          # ~30 fps; sprite timing comes from the GIF delays
     DRAG_THRESHOLD = 6
     MOOD_FADE_MS = 340         # cross-dissolve a mood change
+    HEART_LIFE_MS = 1200       # petting hearts float up and fade this long
 
     def __init__(self, owner: Optional["ClawdApp"] = None):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
@@ -904,6 +1085,9 @@ class PetWidget(QWidget):
 
         self.pct = 0.0
         self.mood = "chill"
+        self._quota_mood = "chill"
+        self._activity = None          # None | (kind, tool)
+        self._hearts = []
 
         self._sprites = SpriteSet()
         if self._sprites.sprites:
@@ -942,11 +1126,10 @@ class PetWidget(QWidget):
     def set_snapshot(self, snap: UsageSnapshot):
         idle = ((snap.source == "logs" and snap.entries == 0)
                 or (snap.source == "api" and snap.pct <= 0))
-        if not snap.error and idle:
-            self.pct = snap.pct
-            self._set_mood("sleep")     # nothing happening right now
-        else:
-            self.set_pct(snap.pct)
+        self.pct = snap.pct
+        self._quota_mood = ("sleep" if (not snap.error and idle)
+                            else mood_for_pct(snap.pct))
+        self._update_mood()
         if snap.error:
             self.setToolTip(snap.error)
         elif snap.source == "api":
@@ -959,7 +1142,23 @@ class PetWidget(QWidget):
 
     def set_pct(self, pct: float):
         self.pct = pct
-        self._set_mood(mood_for_pct(pct))
+        self._quota_mood = mood_for_pct(pct)
+        self._update_mood()
+
+    def set_activity(self, activity):
+        """activity: None or (kind, tool); kind in working/waiting/needs_input/error."""
+        if activity != self._activity:
+            self._activity = activity
+            self._update_mood()
+
+    def _update_mood(self):
+        """Combine quota mood with live activity: quota alarms always win."""
+        mood = self._quota_mood
+        if mood not in ("panic", "limit") and self._activity:
+            kind = self._activity[0]
+            mood = {"working": "focus", "waiting": "happy",
+                    "needs_input": "happy", "error": "panic"}.get(kind, mood)
+        self._set_mood(mood)
 
     def _set_mood(self, mood: str):
         if mood != self.mood:
@@ -1040,10 +1239,46 @@ class PetWidget(QWidget):
 
             frame = sprite.pixmaps[sprite.frame_at(self._clock.elapsed())]
             self._blit(p, frame, mood_in)
+            p.setOpacity(1.0)
+            self._draw_hearts(p)
             p.end()
             return
         ClawdArt.draw(p, QRectF(self.rect()), self._art_state())
+        self._draw_hearts(p)
         p.end()
+
+    def _draw_hearts(self, p: QPainter):
+        if not self._hearts:
+            return
+        now = self._clock.elapsed()
+        alive = []
+        for h in self._hearts:
+            age = now - h["born"]
+            if age > self.HEART_LIFE_MS:
+                continue
+            alive.append(h)
+            t = age / self.HEART_LIFE_MS
+            col = QColor(232, 84, 120, int(235 * (1.0 - t)))
+            x = h["x"] + h["vx"] * age * 0.05
+            y = h["y"] - age * 0.045
+            px = 2.0
+            for ry, row in enumerate(_HEART_ROWS):
+                for rx, ch in enumerate(row):
+                    if ch == "1":
+                        p.fillRect(QRectF(x + rx * px, y + ry * px, px, px), col)
+        self._hearts = alive
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            for _ in range(5):
+                self._hearts.append({
+                    "x": self.width() / 2 + random.uniform(-30, 16),
+                    "y": self.height() * 0.4 + random.uniform(-10, 10),
+                    "vx": random.uniform(-0.5, 0.5),
+                    "born": self._clock.elapsed(),
+                })
+            self.update()
+            event.accept()
 
     # -------------------------------------------------- mouse handling
 
@@ -1450,6 +1685,67 @@ class PanelWidget(QWidget):
 
 
 # ======================================================================
+#  Speech bubble — small transient callout above the pet
+# ======================================================================
+
+class SpeechBubble(QWidget):
+    TAIL_H = 7
+    PAD_X, PAD_Y = 12, 7
+
+    def __init__(self):
+        super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+                         | Qt.Tool | Qt.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        if sys.platform == "darwin":
+            self.setAttribute(Qt.WA_MacAlwaysShowToolWindow, True)
+        self._text = ""
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.timeout.connect(self.hide)
+        self.setFont(QFont("Segoe UI", 9))
+
+    def show_text(self, text: str, pet: QWidget, duration_ms: int = 4200):
+        self._text = text
+        fm = self.fontMetrics()
+        self.setFixedSize(max(46, fm.horizontalAdvance(text) + self.PAD_X * 2),
+                          fm.height() + self.PAD_Y * 2 + self.TAIL_H)
+        self.follow(pet)
+        self.show()
+        self.raise_()
+        self.update()
+        self._hide_timer.start(duration_ms)
+
+    def follow(self, pet: QWidget):
+        geo = pet.frameGeometry()
+        screen = (QGuiApplication.screenAt(geo.center())
+                  or QGuiApplication.primaryScreen())
+        avail = screen.availableGeometry()
+        x = geo.center().x() - self.width() // 2
+        x = max(avail.left() + 4, min(x, avail.right() - self.width() - 4))
+        y = max(avail.top() + 4, geo.top() - self.height() - 2)
+        self.move(x, y)
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        body = QRectF(0, 0, self.width(), self.height() - self.TAIL_H)
+        p.setPen(QPen(QColor("#3d3b38"), 1))
+        p.setBrush(QColor(38, 37, 35, 250))
+        p.drawRoundedRect(body.adjusted(0.5, 0.5, -0.5, -0.5), 9, 9)
+        cx = self.width() / 2
+        tail = QPainterPath()
+        tail.moveTo(cx - 6, body.bottom() - 1)
+        tail.lineTo(cx, self.height() - 1)
+        tail.lineTo(cx + 6, body.bottom() - 1)
+        tail.closeSubpath()
+        p.fillPath(tail, QColor(38, 37, 35, 250))
+        p.setPen(QColor("#eceae6"))
+        p.drawText(body, Qt.AlignCenter, self._text)
+        p.end()
+
+
+# ======================================================================
 #  Application controller — wires pet, panel, tray and scanner together
 # ======================================================================
 
@@ -1469,6 +1765,19 @@ class ClawdApp:
         self.pet = PetWidget(self)
         self.panel = PanelWidget()
         self.panel.on_leave = self.schedule_panel_hide
+        self.bubble = SpeechBubble()
+
+        # real-time activity: log watcher (Stufe 1) + hook receiver (Stufe 2)
+        self.quiet = self.settings.value("quiet", False, type=bool)
+        self._newest_log: Optional[Path] = None
+        self._last_activity = None
+        self._hook_hold_until = 0.0
+        self._activity_timer = QTimer()
+        self._activity_timer.setInterval(ACTIVITY_POLL_MS)
+        self._activity_timer.timeout.connect(self._check_activity)
+        self._udp = QUdpSocket()
+        if self._udp.bind(QHostAddress.LocalHost, HOOK_UDP_PORT):
+            self._udp.readyRead.connect(self._read_hook_datagrams)
 
         self._scan_thread: Optional[ScanThread] = None
         self._scan_timer = QTimer()
@@ -1492,11 +1801,14 @@ class ClawdApp:
     def start(self):
         self.pet.show()
         self._scan_timer.start()
+        self._activity_timer.start()
         self.refresh()
 
     def quit(self):
         self.save_position()
         self._scan_timer.stop()
+        self._activity_timer.stop()
+        self._udp.close()
         thread = self._scan_thread
         if thread is not None and thread.isRunning():
             thread.requestInterruption()
@@ -1540,6 +1852,19 @@ class ClawdApp:
         menu.addAction(act_panel)
 
         menu.addSeparator()
+        act_quiet = QAction("Sprechblasen einblenden" if self.quiet
+                            else "Sprechblasen ausblenden", menu)
+        act_quiet.triggered.connect(self.toggle_quiet)
+        menu.addAction(act_quiet)
+
+        if hooks_registered(CLAUDE_SETTINGS_FILE):
+            act_hooks = QAction("Echtzeit-Hooks deaktivieren", menu)
+            act_hooks.triggered.connect(self.disable_hooks)
+        else:
+            act_hooks = QAction("Echtzeit-Hooks aktivieren (Beta)", menu)
+            act_hooks.triggered.connect(self.enable_hooks)
+        menu.addAction(act_hooks)
+
         act_cal = QAction("Limit kalibrieren …", menu)
         act_cal.triggered.connect(self.calibrate)
         menu.addAction(act_cal)
@@ -1580,6 +1905,7 @@ class ClawdApp:
 
     def _on_scan_result(self, snap: UsageSnapshot):
         self.snapshot = snap
+        self._newest_log = Path(snap.newest_file) if snap.newest_file else None
         self.pet.set_snapshot(snap)
         self.panel.update_snapshot(snap)
         if self.tray:
@@ -1620,6 +1946,95 @@ class ClawdApp:
 
     def pet_moved(self):
         self.panel.reposition(self.pet)
+        if self.bubble.isVisible():
+            self.bubble.follow(self.pet)
+
+    # -------------------------------------------------- real-time activity
+
+    def _check_activity(self):
+        if time.monotonic() < self._hook_hold_until:
+            return                       # live hook events take precedence
+        act = read_last_activity(self._newest_log) if self._newest_log else None
+        prev = self._last_activity
+        self._last_activity = act
+        self.pet.set_activity(act)
+        if act == prev or self.quiet or not self.pet.isVisible():
+            return
+        if act and act[0] == "working" and act[1]:
+            text = TOOL_BUBBLES.get(act[1])
+            if text and (not prev or prev[0] != "working" or prev[1] != act[1]):
+                self.bubble.show_text(text, self.pet)
+        elif act and act[0] == "waiting" and prev and prev[0] == "working":
+            self.bubble.show_text("Fertig! Wartet auf dich.", self.pet)
+
+    def _read_hook_datagrams(self):
+        while self._udp.hasPendingDatagrams():
+            data, _host, _port = self._udp.readDatagram(65535)
+            try:
+                event = json.loads(bytes(data).decode("utf-8", errors="replace"))
+            except ValueError:
+                continue
+            if isinstance(event, dict):
+                self._handle_hook_event(event)
+
+    def _handle_hook_event(self, event: dict):
+        name = event.get("hook_event_name") or ""
+        act = None
+        text = None
+        if name == "PreToolUse":
+            act = ("working", event.get("tool_name"))
+            text = TOOL_BUBBLES.get(event.get("tool_name"))
+        elif name == "Notification":
+            act = ("needs_input", None)
+            text = "Claude wartet auf deine Eingabe!"
+        elif name in ("Stop", "TaskCompleted"):
+            act = ("waiting", None)
+        elif name == "PostToolUseFailure":
+            act = ("error", None)
+            QTimer.singleShot(5000, self._clear_error_state)
+        elif name == "SessionStart":
+            text = "Neue Claude-Session gestartet"
+        else:
+            return
+        self._hook_hold_until = time.monotonic() + 15.0
+        if act is not None:
+            self._last_activity = act
+            self.pet.set_activity(act)
+        if text and not self.quiet and self.pet.isVisible():
+            self.bubble.show_text(
+                text, self.pet, 8000 if name == "Notification" else 4200)
+
+    def _clear_error_state(self):
+        if self.pet._activity and self.pet._activity[0] == "error":
+            self._last_activity = None
+            self.pet.set_activity(None)
+
+    def toggle_quiet(self):
+        self.quiet = not self.quiet
+        self.settings.setValue("quiet", self.quiet)
+        if self.quiet:
+            self.bubble.hide()
+        self._rebuild_tray_menu()
+
+    def enable_hooks(self):
+        command = hook_command()
+        if not command:
+            QMessageBox.warning(
+                None, "Python benötigt",
+                "Für Echtzeit-Hooks wird eine Python-Installation benötigt\n"
+                "(pythonw/py im PATH). Der Log-Watcher läuft trotzdem weiter.")
+            return
+        if register_hooks(CLAUDE_SETTINGS_FILE, command):
+            QMessageBox.information(
+                None, "Hooks aktiviert",
+                "Clawd reagiert ab der nächsten Claude-Code-Session sofort auf\n"
+                "Ereignisse — inklusive „Claude wartet auf deine Eingabe“.\n\n"
+                f"Backup der Einstellungen: {CLAUDE_SETTINGS_FILE.name}.clawd-bak")
+        self._rebuild_tray_menu()
+
+    def disable_hooks(self):
+        unregister_hooks(CLAUDE_SETTINGS_FILE)
+        self._rebuild_tray_menu()
 
     # -------------------------------------------------- calibration
 
@@ -1792,6 +2207,56 @@ def run_selftest() -> int:
           f"{effective_max_tokens()} Tokens Budget; live pct now {probe.pct:.1f}%")
     set_max_tokens_override(None)
     assert not is_calibrated()
+
+    # real-time activity: tail parser + hook registration on scratch files
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        log = Path(td) / "session.jsonl"
+        log.write_text(
+            json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Bash"}]}}) + "\n",
+            encoding="utf-8")
+        assert read_last_activity(log) == ("working", "Bash")
+        log.write_text(
+            json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "done"}]}}) + "\n",
+            encoding="utf-8")
+        assert read_last_activity(log) == ("waiting", None)
+        future = datetime.now(timezone.utc) + timedelta(seconds=ACTIVITY_IDLE_S + 60)
+        assert read_last_activity(log, now=future) is None
+
+        sp = Path(td) / "settings.json"
+        sp.write_text(json.dumps(
+            {"hooks": {"PreToolUse": [{"matcher": "x", "hooks": []}]}}),
+            encoding="utf-8")
+        assert register_hooks(sp, 'py "clawd_hook.py"')
+        assert hooks_registered(sp)
+        data = json.loads(sp.read_text(encoding="utf-8"))
+        assert len(data["hooks"]["PreToolUse"]) == 2
+        assert "Notification" in data["hooks"]
+        assert unregister_hooks(sp)
+        assert not hooks_registered(sp)
+        data = json.loads(sp.read_text(encoding="utf-8"))
+        assert data["hooks"]["PreToolUse"] == [{"matcher": "x", "hooks": []}]
+    print("[selftest] activity parser + hook registration OK")
+
+    assert not sprites.sprites or "happy" in sprites.sprites, "happy sprite missing"
+
+    bubble = SpeechBubble()
+    bubble.show_text("führt Befehle aus …", pet)
+    bubble.hide()
+
+    pet.set_pct(10)
+    pet.set_activity(("working", "Bash"))
+    assert pet.mood == "focus"
+    pet.set_activity(("waiting", None))
+    assert pet.mood == "happy"
+    pet.set_pct(90)                      # quota alarm overrides activity
+    assert pet.mood == "panic"
+    pet.set_pct(10)
+    pet.set_activity(None)
+    assert pet.mood == "chill"
+    print("[selftest] activity mood combination OK")
 
     assert not make_clawd_icon().isNull(), "tray icon failed"
     assert fmt_de(1234567) == "1.234.567"

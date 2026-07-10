@@ -35,7 +35,7 @@ Die eigenständige exe selbst bauen:
 
 ```bash
 pip install pyinstaller
-python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ico" --add-data "sprites;sprites" clawd_pet.py
+python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ico" --add-data "sprites;sprites" --add-data "clawd_hook.py;." clawd_pet.py
 ```
 
 ## Clawds Stimmungen
@@ -62,6 +62,15 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
   Token-Kontingente nicht. Rechtsklick → „Limit kalibrieren …", den
   Prozentwert aus Claudes eigenem `/usage`-Popup eintippen — die App leitet
   daraus dein echtes Budget ab und speichert es.
+- **Reagiert in Echtzeit:** Ein leichtgewichtiger Watcher verfolgt das neueste
+  Session-Log — Clawd hämmert, während Claude Tools ausführt, freut sich, wenn
+  der Turn fertig ist, und Sprechblasen verraten, was gerade passiert („führt
+  Befehle aus …"). Abschaltbar über das Tray-Menü.
+- **Optionale Hooks (Beta):** Tray-Menü → „Echtzeit-Hooks aktivieren"
+  registriert Claude-Code-Hooks für Sofort-Reaktionen — inklusive „Claude
+  wartet auf deine Eingabe". Benötigt Python im PATH; von `settings.json`
+  wird ein `.clawd-bak`-Backup angelegt, Deaktivieren geht im selben Menü.
+- **Streicheln:** Doppelklick auf Clawd lässt Herzchen aufsteigen.
 - Frei per Drag verschiebbar, Position wird gemerkt. Tray-Icon mit manuellem
   Refresh, Verstecken und Beenden.
 

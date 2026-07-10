@@ -34,7 +34,7 @@ Build the standalone exe yourself:
 
 ```bash
 pip install pyinstaller
-python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ico" --add-data "sprites;sprites" clawd_pet.py
+python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ico" --add-data "sprites;sprites" --add-data "clawd_hook.py;." clawd_pet.py
 ```
 
 ## Clawd's moods
@@ -59,6 +59,15 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
 - **Self-calibrating:** Anthropic does not publish the actual token quotas, so
   right-click → "Limit kalibrieren …", type in the percentage Claude's own
   `/usage` popup shows — the app derives your real budget from it and stores it.
+- **Reacts in real time:** a lightweight watcher follows the newest session
+  log — Clawd hammers away while Claude runs tools, turns happy when the turn
+  finishes, and speech bubbles announce what is happening ("führt Befehle
+  aus …"). Mute the bubbles via the tray menu.
+- **Optional hooks (beta):** tray menu → "Echtzeit-Hooks aktivieren" registers
+  Claude Code hooks so the pet reacts instantly — including "Claude is
+  waiting for your input". Needs Python on PATH; a `.clawd-bak` backup of
+  `settings.json` is kept and the entry can be removed from the same menu.
+- **Pet him:** double-click Clawd and hearts float up.
 - Drag him anywhere; the position is remembered. Tray icon with manual
   refresh, hide and quit.
 

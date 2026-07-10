@@ -9,7 +9,7 @@ local session logs. He chills when you have budget, panics when you don't.
 ## Setup
 
 ```bash
-git clone https://github.com/DEIN-GITHUB-NAME/clawd-pet.git
+git clone https://github.com/malzinger/clawd-pet.git
 cd clawd-pet
 pip install -r requirements.txt
 python clawd_pet.py

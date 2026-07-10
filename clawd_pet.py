@@ -787,6 +787,17 @@ class Sprite:
                 break
         return idx
 
+    def frame_at(self, elapsed_ms: int) -> int:
+        """Ping-pong playback: forward, then backward. The animation never
+        jumps back to frame 0, so there is no loop seam to hide."""
+        if self.duration <= 0:
+            return 0
+        span = self.duration * 2
+        pos = elapsed_ms % span
+        if pos >= self.duration:
+            pos = span - pos - 1
+        return self.frame_index(pos)
+
 
 class SpriteSet:
     """Loads the per-mood animations and scales them to one common size."""
@@ -845,7 +856,6 @@ def make_app_icon(mood: str = "chill") -> QIcon:
 class PetWidget(QWidget):
     ANIM_TICK_MS = 33          # ~30 fps; sprite timing comes from the GIF delays
     DRAG_THRESHOLD = 6
-    LOOP_FADE_MS = 300         # cross-dissolve the loop seam
     MOOD_FADE_MS = 340         # cross-dissolve a mood change
 
     def __init__(self, owner: Optional["ClawdApp"] = None):
@@ -918,15 +928,16 @@ class PetWidget(QWidget):
 
     def _set_mood(self, mood: str):
         if mood != self.mood:
+            prev = self._current_pixmap()   # freeze the OLD mood before switching
             self.mood = mood
-            self._apply_mood()
+            self._apply_mood(prev)
 
-    def _apply_mood(self):
+    def _apply_mood(self, prev: Optional[QPixmap] = None):
         sprite = self._sprites.sprite(self.mood)
         if sprite is not None:
-            # freeze what is on screen and dissolve it into the new animation
-            self._prev_pixmap = self._current_pixmap()
-            self._mood_clock.restart()
+            self._prev_pixmap = prev
+            if prev is not None:
+                self._mood_clock.restart()
             self._clock.restart()
         self.update()
 
@@ -934,8 +945,7 @@ class PetWidget(QWidget):
         sprite = self._sprites.sprite(self.mood)
         if sprite is None or not sprite.pixmaps:
             return None
-        pos = self._clock.elapsed() % sprite.duration if sprite.duration else 0
-        return sprite.pixmaps[sprite.frame_index(pos)]
+        return sprite.pixmaps[sprite.frame_at(self._clock.elapsed())]
 
     def _tick(self):
         if self._sprites.sprites:
@@ -993,18 +1003,8 @@ class PetWidget(QWidget):
                     self._prev_pixmap = None
             self._blit(p, self._prev_pixmap, 1.0 - mood_in)
 
-            pos = self._clock.elapsed() % sprite.duration if sprite.duration else 0
-            frame = sprite.pixmaps[sprite.frame_index(pos)]
-
-            # dissolve the tail of the loop into frame 0 so the seam is invisible
-            seam = 0.0
-            if sprite.duration > self.LOOP_FADE_MS * 2:
-                tail = sprite.duration - self.LOOP_FADE_MS
-                if pos > tail:
-                    seam = (pos - tail) / self.LOOP_FADE_MS
-            self._blit(p, frame, mood_in * (1.0 - seam))
-            if seam > 0.0:
-                self._blit(p, sprite.pixmaps[0], mood_in * seam)
+            frame = sprite.pixmaps[sprite.frame_at(self._clock.elapsed())]
+            self._blit(p, frame, mood_in)
             p.end()
             return
         ClawdArt.draw(p, QRectF(self.rect()), self._art_state())

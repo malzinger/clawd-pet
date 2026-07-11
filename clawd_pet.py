@@ -105,6 +105,7 @@ MAX_TOKENS = 88_000                # placeholder default (Max 5x plan)
 PLAN_NAME = "Max 5x"               # shown in the panel header
 WINDOW_HOURS = 5                   # length of Anthropic's fixed session window
 REPLAY_HOURS = 48                  # look-back to reconstruct the window chain
+WEEK_REPLAY_HOURS = 192            # look-back covering the weekly limit window
 SCAN_INTERVAL_MS = 20_000          # how often the logs are rescanned
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
@@ -174,14 +175,72 @@ class UsageSnapshot:
     buckets: list = field(default_factory=list)   # list[UsageBucket] in api mode
     by_model: dict = field(default_factory=dict)  # model id -> input+output tokens
     newest_file: str = ""                         # most recently written session log
+    week_total: int = 0                           # input+output in the weekly window
+    week_by_model: dict = field(default_factory=dict)
+    week_start: Optional[datetime] = None
+    week_reset: Optional[datetime] = None
 
 
-_MAX_TOKENS_OVERRIDE: Optional[int] = None      # set once calibrated
+_MAX_TOKENS_OVERRIDE: Optional[int] = None      # set once manually calibrated
+
+# Auto-calibration: whenever the live API sync succeeds, the exact percentages
+# plus our locally counted tokens yield the real budgets — remembered so the
+# log-estimate mode stays accurate even after the OAuth token expires again.
+_AUTO_BUDGET_5H: Optional[int] = None
+_WEEKLY_ANCHOR: Optional[datetime] = None       # one known weekly reset boundary
+_WEEKLY_BUDGET_ALL: Optional[int] = None
+_WEEKLY_BUDGET_MODELS: dict = {}
 
 
 def effective_max_tokens() -> int:
-    """The calibrated budget if the user measured one, else the placeholder."""
-    return _MAX_TOKENS_OVERRIDE or MAX_TOKENS
+    """Manual calibration wins, then auto-calibration, then the placeholder."""
+    return _MAX_TOKENS_OVERRIDE or _AUTO_BUDGET_5H or MAX_TOKENS
+
+
+def set_auto_calibration(budget_5h=None, weekly_anchor=None,
+                         weekly_budget=None, weekly_model_budgets=None) -> None:
+    global _AUTO_BUDGET_5H, _WEEKLY_ANCHOR, _WEEKLY_BUDGET_ALL, _WEEKLY_BUDGET_MODELS
+    if budget_5h:
+        _AUTO_BUDGET_5H = int(budget_5h)
+    if weekly_anchor is not None:
+        _WEEKLY_ANCHOR = weekly_anchor
+    if weekly_budget:
+        _WEEKLY_BUDGET_ALL = int(weekly_budget)
+    if weekly_model_budgets:
+        _WEEKLY_BUDGET_MODELS = {str(k): int(v)
+                                 for k, v in weekly_model_budgets.items()}
+
+
+def auto_calibration() -> dict:
+    return {"budget_5h": _AUTO_BUDGET_5H, "anchor": _WEEKLY_ANCHOR,
+            "weekly_budget": _WEEKLY_BUDGET_ALL,
+            "models": dict(_WEEKLY_BUDGET_MODELS)}
+
+
+def auto_budget_active() -> bool:
+    return _AUTO_BUDGET_5H is not None
+
+
+def weekly_budget_all() -> Optional[int]:
+    return _WEEKLY_BUDGET_ALL
+
+
+def weekly_model_budgets() -> dict:
+    return dict(_WEEKLY_BUDGET_MODELS)
+
+
+def _weekly_window(now: datetime):
+    """(start, reset) of the current fixed weekly window.
+
+    Anchored at a reset boundary learned from the live API; without one we
+    fall back to a rolling 7 days (reset unknown)."""
+    week = timedelta(days=7)
+    if _WEEKLY_ANCHOR is not None:
+        reset = _WEEKLY_ANCHOR + week * math.ceil((now - _WEEKLY_ANCHOR) / week)
+        if reset <= now:
+            reset += week
+        return reset - week, reset
+    return now - week, None
 
 
 def set_max_tokens_override(value: Optional[int]) -> None:
@@ -206,6 +265,57 @@ def _parse_iso_ts(raw) -> Optional[datetime]:
         return dt.astimezone(timezone.utc)
     except (ValueError, TypeError):
         return None
+
+
+_FILE_CACHE: dict = {}      # path -> (mtime_ns, size, entries) — worker thread only
+
+
+def _parse_file_entries(fp: Path) -> list:
+    """All usage entries of one session log, cached by (mtime, size).
+
+    Finished session files never change, so each is parsed exactly once per
+    process; only actively written logs are re-read on the 20 s rescans."""
+    try:
+        st = fp.stat()
+    except OSError:
+        return []
+    key = str(fp)
+    cached = _FILE_CACHE.get(key)
+    if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+        return cached[2]
+    entries = []
+    try:
+        with open(fp, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"usage"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                ts = _parse_iso_ts(rec.get("timestamp"))
+                if ts is None:
+                    continue
+                msg = rec.get("message")
+                msg = msg if isinstance(msg, dict) else {}
+                usage = msg.get("usage") or rec.get("usage")
+                if not isinstance(usage, dict):
+                    continue
+                entry = _usage_entry(usage, ts)
+                if _entry_weight(entry) <= 0:
+                    continue
+                model = msg.get("model")
+                if isinstance(model, str):
+                    entry[5] = model
+                mid = msg.get("id")
+                entry.append(mid if isinstance(mid, str) else "")
+                entries.append(entry)
+    except OSError:
+        return []
+    _FILE_CACHE[key] = (st.st_mtime_ns, st.st_size, entries)
+    return entries
 
 
 def _usage_entry(usage: dict, ts: datetime):
@@ -279,7 +389,8 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
     line with the largest token count).
     """
     now = now or datetime.now(timezone.utc)
-    cutoff = now - timedelta(hours=REPLAY_HOURS)
+    horizon = now - timedelta(hours=WEEK_REPLAY_HOURS)
+    chain_cutoff = now - timedelta(hours=REPLAY_HOURS)
     snap = UsageSnapshot(updated_at=datetime.now())
 
     if not CLAUDE_PROJECTS_DIR.is_dir():
@@ -303,52 +414,38 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
             mtime = datetime.fromtimestamp(fp.stat().st_mtime, tz=timezone.utc)
         except OSError:
             continue
-        if mtime < cutoff:
-            continue  # file untouched since before the window — nothing new inside
+        if mtime < horizon:
+            continue  # untouched since before the weekly window — irrelevant
         if mtime > newest_mtime:
             newest_mtime = mtime
             snap.newest_file = str(fp)
         snap.files_scanned += 1
-        try:
-            with open(fp, "r", encoding="utf-8", errors="replace") as fh:
-                for line in fh:
-                    if '"usage"' not in line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except (json.JSONDecodeError, ValueError):
-                        continue
-                    if not isinstance(rec, dict):
-                        continue
-                    ts = _parse_iso_ts(rec.get("timestamp"))
-                    if ts is None or ts < cutoff or ts > now + timedelta(minutes=5):
-                        continue
-                    msg = rec.get("message")
-                    msg = msg if isinstance(msg, dict) else {}
-                    usage = msg.get("usage") or rec.get("usage")
-                    if not isinstance(usage, dict):
-                        continue
-                    entry = _usage_entry(usage, ts)
-                    if _entry_weight(entry) <= 0:
-                        continue
-                    model = msg.get("model")
-                    if isinstance(model, str):
-                        entry[5] = model
-                    mid = msg.get("id")
-                    if isinstance(mid, str) and mid:
-                        prev = by_msg_id.get(mid)
-                        if prev is None or _entry_weight(entry) > _entry_weight(prev):
-                            by_msg_id[mid] = entry
-                    else:
-                        anonymous.append(entry)
-        except OSError:
-            continue
+        for entry in _parse_file_entries(fp):
+            ts = entry[4]
+            if ts < horizon or ts > now + timedelta(minutes=5):
+                continue
+            mid = entry[6]
+            if mid:
+                prev = by_msg_id.get(mid)
+                if prev is None or _entry_weight(entry) > _entry_weight(prev):
+                    by_msg_id[mid] = entry
+            else:
+                anonymous.append(entry)
 
     all_entries = list(by_msg_id.values()) + anonymous
-    window_start = _current_window_start(sorted(e[4] for e in all_entries), now)
+    chain_ts = sorted(e[4] for e in all_entries if e[4] >= chain_cutoff)
+    window_start = _current_window_start(chain_ts, now)
     snap.oldest = window_start          # countdown target: window_start + 5 h
 
-    for inp, out, cr, cc, ts, model in all_entries:
+    week_start, week_reset = _weekly_window(now)
+    snap.week_start = week_start
+    snap.week_reset = week_reset
+
+    for inp, out, cr, cc, ts, model, _mid in all_entries:
+        name = pretty_model(model)
+        if ts >= week_start:
+            snap.week_total += inp + out
+            snap.week_by_model[name] = snap.week_by_model.get(name, 0) + inp + out
         if window_start is None or ts < window_start:
             continue                    # previous, already reset window
         snap.entries += 1
@@ -356,7 +453,6 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
         snap.output_tokens += out
         snap.cache_read += cr
         snap.cache_creation += cc
-        name = pretty_model(model)
         snap.by_model[name] = snap.by_model.get(name, 0) + inp + out
 
     snap.total = snap.input_tokens + snap.output_tokens
@@ -505,6 +601,28 @@ def collect_usage(should_stop=None) -> UsageSnapshot:
             snap.buckets = buckets
             five = next((b for b in buckets if b.key == "five_hour"), buckets[0])
             snap.pct = five.pct
+
+            # auto-calibrate: exact API percentages + locally counted tokens
+            # reveal the real budgets, so the log-estimate mode stays accurate
+            # once the OAuth token expires again.
+            budget_5h = weekly_budget = anchor = None
+            model_budgets = {}
+            for b in buckets:
+                if b.key == "seven_day" and b.resets_at is not None:
+                    anchor = b.resets_at
+                if b.pct < 3.0:
+                    continue          # too close to zero to divide reliably
+                if b.key == "five_hour" and snap.total > 0:
+                    budget_5h = round(snap.total / (b.pct / 100.0))
+                elif b.key == "seven_day" and snap.week_total > 0:
+                    weekly_budget = round(snap.week_total / (b.pct / 100.0))
+                elif b.key.startswith("weekly_"):
+                    name = b.label.split("·")[-1].strip()
+                    tokens = snap.week_by_model.get(name, 0)
+                    if tokens > 0:
+                        model_budgets[name] = round(tokens / (b.pct / 100.0))
+            set_auto_calibration(budget_5h, anchor, weekly_budget,
+                                 model_budgets or None)
             return snap
     return scan_usage(should_stop=should_stop)
 
@@ -1584,10 +1702,30 @@ class PanelWidget(QWidget):
                 self._animate_row(mrow, share)
                 mrow["reset"].setText(f"{fmt_de(tok)} Tokens (In + Out)")
                 keys.add(mkey)
+
+            # weekly limits, estimated from the same logs
+            wtail = ("  ·  " + _fmt_reset(snap.week_reset)
+                     if snap.week_reset is not None else "  ·  ≈ letzte 7 Tage")
+            wk = self._ensure_row("week_all", "Wöchentlich · alle Modelle")
+            wk["reset"].setText(f"{fmt_de(snap.week_total)} Tokens{wtail}")
+            wbudget = weekly_budget_all()
+            if wbudget:
+                self._animate_row(wk, snap.week_total / wbudget * 100.0)
+            else:
+                wk["pct"].setText("—")
+            keys.add("week_all")
+            for name, mb in weekly_model_budgets().items():
+                tokens = snap.week_by_model.get(name, 0)
+                mkey = f"week:{name}"
+                mrow = self._ensure_row(mkey, f"Wöchentlich · {name}")
+                self._animate_row(mrow, tokens / mb * 100.0 if mb else 0.0)
+                mrow["reset"].setText(f"{fmt_de(tokens)} Tokens{wtail}")
+                keys.add(mkey)
             self._show_only(keys)
 
-            hint = ("Limit kalibriert" if is_calibrated() else
-                    "Platzhalter-Limit – im Tray-Menü kalibrieren")
+            hint = ("Limit kalibriert" if is_calibrated()
+                    else "Limits automatisch kalibriert" if auto_budget_active()
+                    else "Platzhalter-Limit – im Tray-Menü kalibrieren")
             self.detail_label.setText(
                 f"{fmt_de(snap.total)} Tokens verbraucht (Input + Output) · {hint}")
         self.detail_label.setVisible(bool(self.detail_label.text()))
@@ -1798,6 +1936,19 @@ class ClawdApp:
         except (TypeError, ValueError):
             self.settings.remove("max_tokens")
 
+        # restore auto-calibration learned from previous live API syncs
+        try:
+            anchor_raw = self.settings.value("weekly_anchor", "") or ""
+            set_auto_calibration(
+                budget_5h=int(self.settings.value("auto_budget_5h", 0) or 0) or None,
+                weekly_anchor=_parse_iso_ts(anchor_raw) if anchor_raw else None,
+                weekly_budget=int(self.settings.value("weekly_budget_all", 0) or 0) or None,
+                weekly_model_budgets=json.loads(
+                    self.settings.value("weekly_budget_models", "") or "{}") or None,
+            )
+        except (TypeError, ValueError):
+            pass
+
         self.pet = PetWidget(self)
         self.panel = PanelWidget()
         self.panel.on_leave = self.schedule_panel_hide
@@ -1942,6 +2093,15 @@ class ClawdApp:
     def _on_scan_result(self, snap: UsageSnapshot):
         self.snapshot = snap
         self._newest_log = Path(snap.newest_file) if snap.newest_file else None
+        cal = auto_calibration()          # persist budgets learned from live syncs
+        if cal["budget_5h"]:
+            self.settings.setValue("auto_budget_5h", cal["budget_5h"])
+        if cal["weekly_budget"]:
+            self.settings.setValue("weekly_budget_all", cal["weekly_budget"])
+        if cal["anchor"] is not None:
+            self.settings.setValue("weekly_anchor", cal["anchor"].isoformat())
+        if cal["models"]:
+            self.settings.setValue("weekly_budget_models", json.dumps(cal["models"]))
         self.pet.set_snapshot(snap)
         self.panel.update_snapshot(snap)
         if self.tray:
@@ -2243,6 +2403,18 @@ def run_selftest() -> int:
           f"{effective_max_tokens()} Tokens Budget; live pct now {probe.pct:.1f}%")
     set_max_tokens_override(None)
     assert not is_calibrated()
+
+    # weekly window from a known anchor + budget-derived percentages
+    set_auto_calibration(
+        weekly_anchor=datetime(2026, 7, 15, 17, 0, tzinfo=timezone.utc),
+        weekly_budget=1_000_000, weekly_model_budgets={"Fable": 500_000})
+    ws, wr = _weekly_window(datetime(2026, 7, 11, 0, 0, tzinfo=timezone.utc))
+    assert wr == datetime(2026, 7, 15, 17, 0, tzinfo=timezone.utc)
+    assert ws == wr - timedelta(days=7)
+    panel.update_snapshot(scan_usage())
+    assert "week_all" in panel._rows and "week:Fable" in panel._rows
+    print(f"[selftest] weekly window OK, week_total={panel._snap.week_total} "
+          f"week_by_model={panel._snap.week_by_model}")
 
     # fixed-window replay: chained windows and fresh starts after silence
     base = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)

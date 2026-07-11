@@ -141,6 +141,12 @@ SPRITE_FILES = {
     "panic": "clawd-debugger.gif",       # 80-100 % quota / tool error
     "limit": "clawd-error.gif",          # over the limit
     "pet": "clawd-react-double-jump.gif",  # transient double-click reaction
+    "annoyed": "clawd-react-annoyed.gif",  # over-petted
+    # random idle flourishes, played occasionally while calm (see IDLE_FLOURISHES)
+    "juggle": "clawd-juggling.gif",
+    "conduct": "clawd-conducting.gif",
+    "sweep": "clawd-sweeping.gif",
+    "carry": "clawd-carrying.gif",
 }
 
 # --- Real-time activity (Stufe 1: log watcher, Stufe 2: opt-in hooks) -------
@@ -163,7 +169,7 @@ USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
 ORG_NAME = "ClawdPet"
 APP_NAME = "Clawd"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 
 # --- Burn-rate forecast + threshold notifications ----------------------------
 BURN_LOOKBACK_S = 3600      # forecast fits over at most the last hour
@@ -1000,7 +1006,17 @@ MOOD_COLORS = {
     "panic": "#f0883e",
     "limit": "#f85149",
     "pet": "#3fb950",
+    "annoyed": "#d29922",
+    "juggle": "#3fb950", "conduct": "#3fb950", "sweep": "#3fb950",
+    "carry": "#3fb950",
 }
+
+# Random idle animations played now and then while Clawd is calm (mood "chill").
+IDLE_FLOURISHES = ("juggle", "conduct", "sweep", "carry")
+IDLE_SWITCH_MS = 6000       # how often the idle animation may change
+IDLE_FLOURISH_PROB = 0.45   # chance an idle tick starts a flourish (else idle)
+PET_SPAM_WINDOW_S = 3.0     # over-petting window
+PET_SPAM_COUNT = 3          # this many pets within the window -> annoyed
 
 # Which animation each running tool maps to (used only when quota is calm).
 TOOL_MOODS = {
@@ -1012,7 +1028,9 @@ TOOL_MOODS = {
 
 # If a mapped animation is missing (older sprites/ folder), fall back sensibly.
 MOOD_FALLBACK = {"type": "focus", "read": "chill", "think": "focus",
-                 "notify": "happy", "pet": "happy"}
+                 "notify": "happy", "pet": "happy", "annoyed": "happy",
+                 "juggle": "chill", "conduct": "chill", "sweep": "chill",
+                 "carry": "chill"}
 
 
 # ======================================================================
@@ -1905,6 +1923,12 @@ class PetWidget(QWidget):
         self._react_timer = QTimer(self)
         self._react_timer.setSingleShot(True)
         self._react_timer.timeout.connect(self._end_reaction)
+        self._pet_times = []           # recent petting stamps (spam -> annoyed)
+        self._idle_variant = None      # current random idle flourish, or None
+        self._idle_pool = []           # available idle flourishes (filled below)
+        self._idle_timer = QTimer(self)
+        self._idle_timer.setInterval(IDLE_SWITCH_MS)
+        self._idle_timer.timeout.connect(self._tick_idle)
 
         self._sprites = SpriteSet()
         if self._sprites.sprites:
@@ -1934,6 +1958,11 @@ class PetWidget(QWidget):
         self._anim_timer = QTimer(self)
         self._anim_timer.timeout.connect(self._tick)
         self._anim_timer.start(self.ANIM_TICK_MS)
+
+        self._idle_pool = [m for m in IDLE_FLOURISHES
+                           if m in self._sprites.sprites]
+        if self._idle_pool:
+            self._idle_timer.start()
 
         self._apply_mood()
         self.setToolTip(tr("tooltip_wait"))
@@ -1985,20 +2014,50 @@ class PetWidget(QWidget):
                 mood = "happy"
             elif kind == "error":
                 mood = "panic"
+        if mood == "chill":
+            if self._idle_variant:
+                mood = self._idle_variant          # play the random idle flourish
+        else:
+            self._idle_variant = None              # left idle -> don't resume a stale one
         if self._sprites.sprites and mood not in self._sprites.sprites:
             mood = MOOD_FALLBACK.get(mood, mood)   # older sprites/ without new gifs
         self._set_mood(mood)
 
     def _play_reaction(self):
-        """Briefly override the mood with the double-jump petting animation."""
-        if not (self._sprites.sprites and "pet" in self._sprites.sprites):
+        """Petting reaction: a happy double-jump, or annoyed if over-petted."""
+        loaded = self._sprites.sprites
+        if not loaded:
+            return
+        now = time.monotonic()
+        self._pet_times = [t for t in self._pet_times
+                           if now - t < PET_SPAM_WINDOW_S]
+        self._pet_times.append(now)
+        want = "annoyed" if len(self._pet_times) >= PET_SPAM_COUNT else "pet"
+        if want not in loaded:
+            want = "pet"
+        if want not in loaded:
             return
         self._react_active = True
-        self._set_mood("pet")
+        self._set_mood(want)
         self._react_timer.start(self.REACT_MS)
 
     def _end_reaction(self):
         self._react_active = False
+        self._update_mood()
+
+    def _tick_idle(self):
+        """While Clawd is calm, occasionally play a random idle flourish."""
+        calm = (not self._react_active and self._quota_mood == "chill"
+                and self._activity is None)
+        if not calm:
+            if self._idle_variant is not None:
+                self._idle_variant = None
+                self._update_mood()
+            return
+        if self._idle_variant is not None:
+            self._idle_variant = None                  # flourish over -> back to idle
+        elif self._idle_pool and random.random() < IDLE_FLOURISH_PROB:
+            self._idle_variant = random.choice(self._idle_pool)
         self._update_mood()
 
     def _set_mood(self, mood: str):
@@ -3331,7 +3390,8 @@ def run_selftest() -> int:
     sprites = SpriteSet()
     frames = {m: len(s.pixmaps) for m, s in sprites.sprites.items()}
     print(f"[selftest] sprites loaded: {sorted(sprites.sprites)} frames={frames}")
-    for m in ("type", "read", "think", "notify", "pet"):
+    for m in ("type", "read", "think", "notify", "pet", "annoyed",
+              "juggle", "conduct", "sweep", "carry"):
         # only require a mood when its gif is actually present, so an older
         # sprites/ folder still runs (MOOD_FALLBACK covers the missing ones)
         if (SPRITE_DIR / SPRITE_FILES[m]).is_file():
@@ -3507,6 +3567,29 @@ def run_selftest() -> int:
         assert pet.mood == "pet"
         pet._end_reaction()
         assert not pet._react_active and pet.mood == "type"
+    # over-petting makes Clawd annoyed instead of doing a happy jump
+    if "annoyed" in pet._sprites.sprites:
+        pet.set_pct(10)
+        pet.set_activity(None)
+        pet._end_reaction()
+        pet._pet_times = []
+        for _ in range(PET_SPAM_COUNT):
+            pet._play_reaction()
+        assert pet.mood == "annoyed", "spam petting should annoy Clawd"
+        pet._end_reaction()
+    # a random idle flourish shows only while calm, and is dropped when busy
+    if pet._idle_pool:
+        pet.set_pct(10)
+        pet.set_activity(None)
+        pet._quota_mood = "chill"
+        pet._idle_variant = pet._idle_pool[0]
+        pet._update_mood()
+        assert pet.mood == pet._idle_pool[0], "idle flourish not shown while calm"
+        pet.set_activity(("working", "Read"))   # busy -> flourish ignored AND cleared
+        assert pet.mood == "read"
+        assert pet._idle_variant is None, "stale flourish not cleared on interruption"
+        pet.set_activity(None)                  # back to calm -> plain chill, no resume
+        assert pet.mood == "chill"
     print("[selftest] activity mood combination OK")
 
     # language toggle: strings and number formatting switch together

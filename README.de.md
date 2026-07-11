@@ -65,7 +65,9 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
   („bearbeitet clawd_pet.py", „führt aus: git push") — direkt aus dem lokalen
   Session-Log gelesen, nichts wird gesendet. Clawd selbst animiert passend
   dazu — tippt beim Bearbeiten, liest beim Suchen, denkt zwischen Tools und
-  zeigt eine Benachrichtigung, wenn Claude auf dich wartet.
+  zeigt eine Benachrichtigung, wenn Claude auf dich wartet. Wenn er nichts zu
+  tun hat, spielt er ab und zu eine zufällige Animation (jonglieren, fegen,
+  dirigieren …), und wenn du ihn zu oft streichelst, wird er genervt.
 - **Selbst-kalibrierend:** Anthropic veröffentlicht die echten
   Token-Kontingente nicht. Rechtsklick → „Limit kalibrieren …", den
   Prozentwert aus Claudes eigenem `/usage`-Popup eintippen — die App leitet

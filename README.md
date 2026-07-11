@@ -63,7 +63,9 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
   ("editing clawd_pet.py", "running: git push") — read straight from the local
   session log, nothing sent anywhere. Clawd himself animates to match — typing
   while editing, reading while grepping, thinking between tools, and popping a
-  notification when Claude needs your input.
+  notification when Claude needs your input. When idle he plays the occasional
+  random flourish (juggling, sweeping, conducting …), and over-petting him
+  makes him grumpy.
 - **Self-calibrating:** Anthropic does not publish the actual token quotas, so
   right-click → "Limit kalibrieren …", type in the percentage Claude's own
   `/usage` popup shows — the app derives your real budget from it and stores it.

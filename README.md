@@ -61,15 +61,20 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
 - **See what Claude is working on:** the panel's top section names the current
   project, your latest prompt, and the running tool with its concrete target
   ("editing clawd_pet.py", "running: git push") — read straight from the local
-  session log, nothing sent anywhere.
+  session log, nothing sent anywhere. Clawd himself animates to match — typing
+  while editing, reading while grepping, thinking between tools, and popping a
+  notification when Claude needs your input.
 - **Self-calibrating:** Anthropic does not publish the actual token quotas, so
   right-click → "Limit kalibrieren …", type in the percentage Claude's own
   `/usage` popup shows — the app derives your real budget from it and stores it.
 - **Burn-rate forecast:** the panel projects when you would hit the limit at
   your current pace ("At this pace: limit around 16:40") — or confirms the
   pace lasts until the reset.
-- **Notifications:** tray toasts when usage crosses 80 % / 95 % and when the
-  5-hour window resets ("Fresh budget!"). Toggle via the tray menu.
+- **Notifications:** tray toasts when usage crosses 80 % / 95 %, when the
+  5-hour window resets ("Fresh budget!"), and — the useful one — **when Claude
+  finishes a turn or asks for your input** while you are looking elsewhere. A
+  live turn timer ("· 2:14") in the task view shows how long the current turn
+  has been running. Toggle notifications (and an optional sound) in the tray menu.
 - **Usage history:** the panel draws a 24-hour sparkline of your usage from a
   local history file (`~/.clawd/history.json`), so you can see when you burn
   the most. Nothing leaves your machine.

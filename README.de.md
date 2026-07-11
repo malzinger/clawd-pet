@@ -63,7 +63,9 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
 - **Sieh, woran Claude arbeitet:** Ganz oben im Panel stehen das aktuelle
   Projekt, dein letzter Prompt und das laufende Tool mit konkretem Ziel
   („bearbeitet clawd_pet.py", „führt aus: git push") — direkt aus dem lokalen
-  Session-Log gelesen, nichts wird gesendet.
+  Session-Log gelesen, nichts wird gesendet. Clawd selbst animiert passend
+  dazu — tippt beim Bearbeiten, liest beim Suchen, denkt zwischen Tools und
+  zeigt eine Benachrichtigung, wenn Claude auf dich wartet.
 - **Selbst-kalibrierend:** Anthropic veröffentlicht die echten
   Token-Kontingente nicht. Rechtsklick → „Limit kalibrieren …", den
   Prozentwert aus Claudes eigenem `/usage`-Popup eintippen — die App leitet
@@ -71,9 +73,12 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
 - **Burn-Rate-Prognose:** Das Panel rechnet hoch, wann du bei aktuellem
   Tempo das Limit erreichst („Bei diesem Tempo: Limit ca. 16:40 Uhr") —
   oder bestätigt, dass das Tempo bis zum Reset reicht.
-- **Benachrichtigungen:** Tray-Toasts beim Überschreiten von 80 % / 95 % und
-  beim Reset des 5-Stunden-Fensters („Budget wieder frisch!"). Im Tray-Menü
-  abschaltbar.
+- **Benachrichtigungen:** Tray-Toasts beim Überschreiten von 80 % / 95 %, beim
+  Reset des 5-Stunden-Fensters („Budget wieder frisch!") und — der nützliche
+  Fall — **wenn Claude einen Turn beendet oder auf deine Eingabe wartet**,
+  während du woanders hinschaust. Ein Turn-Timer („· 2:14") in der Aufgaben-
+  Ansicht zeigt, wie lange der aktuelle Turn schon läuft. Benachrichtigungen
+  (und optional ein Ton) im Tray-Menü umschaltbar.
 - **Nutzungsverlauf:** Das Panel zeichnet eine 24-Stunden-Sparkline aus einer
   lokalen Verlaufsdatei (`~/.clawd/history.json`) — so siehst du, wann du am
   meisten verbrauchst. Nichts verlässt deinen Rechner.

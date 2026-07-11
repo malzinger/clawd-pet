@@ -130,12 +130,17 @@ PANEL_WIDTH = 392                  # width of the slide-out panel
 # the built-in vector Clawd is drawn instead.
 SPRITE_DIR = Path(__file__).resolve().parent / "sprites"
 SPRITE_FILES = {
-    "sleep": "clawd-sleeping.gif",   # no activity in the rolling window
-    "chill": "clawd-idle.gif",
-    "focus": "clawd-building.gif",
-    "happy": "clawd-happy.gif",      # turn finished / waiting for your input
-    "panic": "clawd-debugger.gif",
-    "limit": "clawd-error.gif",
+    "sleep": "clawd-sleeping.gif",       # no activity in the rolling window
+    "chill": "clawd-idle.gif",           # budget left, no live activity
+    "focus": "clawd-building.gif",       # running commands / 50-80 % quota
+    "type": "clawd-typing.gif",          # editing / writing files
+    "read": "clawd-idle-reading.gif",    # reading / searching / browsing
+    "think": "clawd-thinking.gif",       # working with no tool (Claude thinking)
+    "notify": "clawd-notification.gif",  # Claude is waiting for your input
+    "happy": "clawd-happy.gif",          # turn finished
+    "panic": "clawd-debugger.gif",       # 80-100 % quota / tool error
+    "limit": "clawd-error.gif",          # over the limit
+    "pet": "clawd-react-double-jump.gif",  # transient double-click reaction
 }
 
 # --- Real-time activity (Stufe 1: log watcher, Stufe 2: opt-in hooks) -------
@@ -158,12 +163,14 @@ USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
 ORG_NAME = "ClawdPet"
 APP_NAME = "Clawd"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 
 # --- Burn-rate forecast + threshold notifications ----------------------------
 BURN_LOOKBACK_S = 3600      # forecast fits over at most the last hour
 BURN_MIN_SPAN_S = 300       # ... but needs at least 5 minutes of samples
 NOTIFY_THRESHOLDS = (95.0, 80.0)   # toast on upward crossings, highest wins
+WAIT_ALERT_MIN_S = 15       # only alert "your turn" on turns worked at least this long
+ALERT_COOLDOWN_S = 20       # collapse near-simultaneous alerts (hook + log)
 
 # --- Autostart (Windows Run key, toggled via the tray menu) ------------------
 AUTOSTART_REG_PATH = (r"HKEY_CURRENT_USER\Software\Microsoft"
@@ -984,10 +991,28 @@ def mood_for_pct(pct: float) -> str:
 MOOD_COLORS = {
     "sleep": "#3fb950",
     "chill": "#3fb950",
+    "read": "#3fb950",
+    "think": "#3fb950",
+    "type": "#d29922",
     "focus": "#d29922",
+    "notify": "#d29922",
+    "happy": "#3fb950",
     "panic": "#f0883e",
     "limit": "#f85149",
+    "pet": "#3fb950",
 }
+
+# Which animation each running tool maps to (used only when quota is calm).
+TOOL_MOODS = {
+    "Read": "read", "Grep": "read", "Glob": "read",
+    "WebFetch": "read", "WebSearch": "read",
+    "Edit": "type", "Write": "type", "MultiEdit": "type", "NotebookEdit": "type",
+    "Bash": "focus", "PowerShell": "focus", "Task": "focus", "Agent": "focus",
+}
+
+# If a mapped animation is missing (older sprites/ folder), fall back sensibly.
+MOOD_FALLBACK = {"type": "focus", "read": "chill", "think": "focus",
+                 "notify": "happy", "pet": "happy"}
 
 
 # ======================================================================
@@ -1324,6 +1349,12 @@ STRINGS = {
         "task_project": "Projekt · {name}",
         "task_waiting": "Wartet auf dich",
         "task_quote": "„{s}“",
+        "notify_done_title": "Claude ist fertig",
+        "notify_done_text": "Dein Turn – Claude wartet auf dich.",
+        "notify_input_title": "Claude braucht dich",
+        "notify_input_text": "Claude wartet auf deine Eingabe.",
+        "menu_sound_on": "Benachrichtigungston aktivieren",
+        "menu_sound_off": "Benachrichtigungston deaktivieren",
     },
     "en": {
         "panel_title": "Plan usage limits · {plan}",
@@ -1411,6 +1442,12 @@ STRINGS = {
         "task_project": "Project · {name}",
         "task_waiting": "Waiting for you",
         "task_quote": "“{s}”",
+        "notify_done_title": "Claude is done",
+        "notify_done_text": "Your turn — Claude is waiting for you.",
+        "notify_input_title": "Claude needs you",
+        "notify_input_text": "Claude is waiting for your input.",
+        "menu_sound_on": "Enable notification sound",
+        "menu_sound_off": "Disable notification sound",
     },
 }
 
@@ -1441,6 +1478,14 @@ def fmt_de(n: int) -> str:
 def fmt_pct_de(pct: float) -> str:
     s = f"{pct:.1f}"
     return (s.replace(".", ",") if _LANG == "de" else s) + " %"
+
+
+def _fmt_dur(seconds: float) -> str:
+    """Compact duration: 5 -> '0:05', 74 -> '1:14', 3661 -> '1:01:01'."""
+    s = max(0, int(seconds))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
 
 
 # ======================================================================
@@ -1753,6 +1798,9 @@ class Sprite:
                 w, h, Qt.IgnoreAspectRatio, Qt.FastTransformation)
             for img in self.images
         ]
+        # the full-canvas source frames are never read again; drop them so a
+        # 24/7 tray app does not hold ~200 MB of decoded QImages for its lifetime
+        self.images = []
 
     def frame_index(self, pos_ms: int) -> int:
         idx = 0
@@ -1804,7 +1852,7 @@ class SpriteSet:
         return self.sprites.get(mood)
 
 
-@functools.lru_cache(maxsize=16)
+@functools.lru_cache(maxsize=32)
 def sprite_pixmap(mood: str, size: int) -> Optional[QPixmap]:
     """First frame of a mood GIF, cropped to content, crisply scaled."""
     fp = SPRITE_DIR / SPRITE_FILES.get(mood, "")
@@ -1837,6 +1885,7 @@ class PetWidget(QWidget):
     DRAG_THRESHOLD = 6
     MOOD_FADE_MS = 340         # cross-dissolve a mood change
     HEART_LIFE_MS = 1200       # petting hearts float up and fade this long
+    REACT_MS = 1300            # how long the petting reaction animation plays
 
     def __init__(self, owner: Optional["ClawdApp"] = None):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
@@ -1852,6 +1901,10 @@ class PetWidget(QWidget):
         self._quota_mood = "chill"
         self._activity = None          # None | (kind, tool)
         self._hearts = []
+        self._react_active = False     # a transient petting reaction is playing
+        self._react_timer = QTimer(self)
+        self._react_timer.setSingleShot(True)
+        self._react_timer.timeout.connect(self._end_reaction)
 
         self._sprites = SpriteSet()
         if self._sprites.sprites:
@@ -1914,13 +1967,39 @@ class PetWidget(QWidget):
             self._update_mood()
 
     def _update_mood(self):
-        """Combine quota mood with live activity: quota alarms always win."""
+        """Combine quota mood with live activity: quota alarms + reactions win.
+
+        The running tool picks the animation (typing / reading / thinking /
+        building), so Clawd visibly does what Claude is doing.
+        """
+        if self._react_active:
+            return                       # let a petting reaction play out
         mood = self._quota_mood
         if mood not in ("panic", "limit") and self._activity:
-            kind = self._activity[0]
-            mood = {"working": "focus", "waiting": "happy",
-                    "needs_input": "happy", "error": "panic"}.get(kind, mood)
+            kind, tool = self._activity[0], self._activity[1]
+            if kind == "working":
+                mood = TOOL_MOODS.get(tool, "think" if tool is None else "focus")
+            elif kind == "needs_input":
+                mood = "notify"
+            elif kind == "waiting":
+                mood = "happy"
+            elif kind == "error":
+                mood = "panic"
+        if self._sprites.sprites and mood not in self._sprites.sprites:
+            mood = MOOD_FALLBACK.get(mood, mood)   # older sprites/ without new gifs
         self._set_mood(mood)
+
+    def _play_reaction(self):
+        """Briefly override the mood with the double-jump petting animation."""
+        if not (self._sprites.sprites and "pet" in self._sprites.sprites):
+            return
+        self._react_active = True
+        self._set_mood("pet")
+        self._react_timer.start(self.REACT_MS)
+
+    def _end_reaction(self):
+        self._react_active = False
+        self._update_mood()
 
     def _set_mood(self, mood: str):
         if mood != self.mood:
@@ -2039,6 +2118,7 @@ class PetWidget(QWidget):
                     "vx": random.uniform(-0.5, 0.5),
                     "born": self._clock.elapsed(),
                 })
+            self._play_reaction()          # Clawd does a happy double-jump
             self.update()
             event.accept()
 
@@ -2178,6 +2258,8 @@ class PanelWidget(QWidget):
 
         # ---- "what Clawd is working on" (current task) -----------------
         self._task_ctx = None
+        self._work_since = None
+        self._task_action = ""
         self.task_title = QLabel(tr("task_title"))
         self.task_title.setObjectName("note")
         lay.addWidget(self.task_title)
@@ -2291,15 +2373,22 @@ class PanelWidget(QWidget):
         self._title.setText(tr("panel_title", plan=PLAN_NAME))
         self.history_title.setText(tr("history_title"))
         self.task_title.setText(tr("task_title"))
-        self.set_task(self._task_ctx)
+        self.set_task(self._task_ctx, self._work_since)
 
     def set_history(self, series):
         self._history = list(series)
 
-    def set_task(self, ctx):
-        """Update the 'what Clawd is working on' section from a SessionContext."""
+    def set_task(self, ctx, work_since=None):
+        """Update the 'what Clawd is working on' section from a SessionContext.
+
+        work_since is a time.monotonic() stamp of when the current working
+        phase began (or None); the panel derives the live '· M:SS' turn timer
+        from it and ticks it every second while visible.
+        """
         self._task_ctx = ctx
+        self._work_since = work_since
         if ctx is None or not (ctx.task or ctx.kind):
+            self._task_action = ""       # else _refresh_countdown re-shows a stale line
             for w in self._task_widgets:
                 w.setVisible(False)
             self._relayout()
@@ -2311,15 +2400,26 @@ class PanelWidget(QWidget):
         self.task_prompt.setVisible(bool(ctx.task))
         if ctx.kind == "working":
             line = tool_action(ctx.tool, ctx.detail)
-            self.task_activity.setText("⚙ " + line if line else "")
+            self._task_action = "⚙ " + line if line else "⚙"
         elif ctx.kind == "waiting":
-            self.task_activity.setText("✓ " + tr("task_waiting"))
+            self._task_action = "✓ " + tr("task_waiting")
         else:
-            self.task_activity.setText("")
-        self.task_activity.setVisible(bool(self.task_activity.text()))
+            self._task_action = ""
+        self._render_task_activity()
         self.task_title.setVisible(True)
         self.task_div.setVisible(True)
         self._relayout()
+
+    def _render_task_activity(self):
+        """Compose the activity line with the live turn timer (no relayout, so
+        the per-second tick never resizes or jitters the card)."""
+        text = self._task_action
+        ctx = self._task_ctx
+        if (text and ctx is not None and ctx.kind == "working"
+                and self._work_since is not None):
+            text += " · " + _fmt_dur(time.monotonic() - self._work_since)
+        self.task_activity.setText(text)
+        self.task_activity.setVisible(bool(text))
 
     def _relayout(self):
         # rows and the task section are shown/hidden dynamically — force a full
@@ -2450,6 +2550,7 @@ class PanelWidget(QWidget):
         self.forecast_label.setVisible(bool(self.forecast_label.text()))
 
     def _refresh_countdown(self):
+        self._render_task_activity()     # tick the turn timer while visible
         snap = self._snap
         if snap is None:
             return
@@ -2674,6 +2775,7 @@ class ClawdApp:
         # real-time activity: log watcher (Stufe 1) + hook receiver (Stufe 2)
         self.quiet = self.settings.value("quiet", False, type=bool)
         self.notify_enabled = self.settings.value("notify", True, type=bool)
+        self.notify_sound = self.settings.value("notify_sound", False, type=bool)
         # burn-rate history and last pct are kept PER SOURCE ("api"/"logs"):
         # the two modes report on different absolute scales, so cross-comparing
         # them would fake resets — but a transient api->logs->api fallback (an
@@ -2691,6 +2793,10 @@ class ClawdApp:
         self._newest_log: Optional[Path] = None
         self._last_activity = None
         self._session_ctx = None
+        self._work_kind = None            # last log-derived activity kind
+        self._work_started_mono = None    # start of the current working phase
+        self._work_log = None             # which session log that phase belongs to
+        self._last_alert_mono = 0.0       # rate-limit "your turn" alerts
         self._hook_hold_until = 0.0
         self._activity_timer = QTimer()
         self._activity_timer.setInterval(ACTIVITY_POLL_MS)
@@ -2801,6 +2907,11 @@ class ClawdApp:
                              else tr("menu_notify_on"), menu)
         act_notify.triggered.connect(self.toggle_notify)
         menu.addAction(act_notify)
+
+        act_sound = QAction(tr("menu_sound_off") if self.notify_sound
+                            else tr("menu_sound_on"), menu)
+        act_sound.triggered.connect(self.toggle_notify_sound)
+        menu.addAction(act_sound)
 
         if hooks_registered(CLAUDE_SETTINGS_FILE):
             act_hooks = QAction(tr("menu_hooks_off"), menu)
@@ -2947,7 +3058,24 @@ class ClawdApp:
     def _check_activity(self):
         ctx = read_session_context(self._newest_log) if self._newest_log else None
         self._session_ctx = ctx
-        self.panel.set_task(ctx)         # keep the task view live, even under hooks
+        # turn timer + "your turn" alert, keyed to the session log so a switch
+        # between concurrent sessions never fakes a turn-end or a cross-session
+        # timer (self._newest_log is the newest log across ALL projects)
+        kind = ctx.kind if ctx else None
+        log = self._newest_log
+        if kind == "working" and self._work_kind == "working" and log == self._work_log:
+            pass                                    # same working phase continues
+        elif kind == "working":
+            self._work_started_mono = time.monotonic()   # a new working phase
+            self._work_log = log
+        else:
+            if (self._work_kind == "working" and kind == "waiting"
+                    and log == self._work_log):     # same session finished its turn
+                self._alert_turn_done(time.monotonic()
+                                      - (self._work_started_mono or time.monotonic()))
+            self._work_started_mono = None
+        self._work_kind = kind
+        self.panel.set_task(ctx, self._work_started_mono)  # live task view + timer
         if time.monotonic() < self._hook_hold_until:
             return                       # live hook events drive the mood
         act = (ctx.kind, ctx.tool) if ctx and ctx.kind else None
@@ -2984,6 +3112,7 @@ class ClawdApp:
         elif name == "Notification":
             act = ("needs_input", None)
             text = tr("bubble_input")
+            self._fire_alert(tr("notify_input_title"), tr("notify_input_text"))
         elif name in ("Stop", "TaskCompleted"):
             act = ("waiting", None)
         elif name == "PostToolUseFailure":
@@ -3017,6 +3146,29 @@ class ClawdApp:
         self.notify_enabled = not self.notify_enabled
         self.settings.setValue("notify", self.notify_enabled)
         self._rebuild_tray_menu()
+
+    def toggle_notify_sound(self):
+        self.notify_sound = not self.notify_sound
+        self.settings.setValue("notify_sound", self.notify_sound)
+        self._rebuild_tray_menu()
+
+    def _fire_alert(self, title: str, text: str):
+        """A 'your turn' tray toast, rate-limited so near-simultaneous
+        triggers (a hook and the log poll) do not double-fire."""
+        now = time.monotonic()
+        if (not self.notify_enabled or self.tray is None
+                or now - self._last_alert_mono < ALERT_COOLDOWN_S):
+            return
+        self._last_alert_mono = now
+        self._last_toast_was_update = False
+        self.tray.showMessage(title, text, QSystemTrayIcon.Information, 7000)
+        if self.notify_sound:
+            QApplication.beep()
+
+    def _alert_turn_done(self, elapsed: float):
+        """Alert when a turn Claude actually spent time on has finished."""
+        if elapsed >= WAIT_ALERT_MIN_S:
+            self._fire_alert(tr("notify_done_title"), tr("notify_done_text"))
 
     def toggle_autostart(self):
         set_autostart(not autostart_enabled())
@@ -3179,6 +3331,11 @@ def run_selftest() -> int:
     sprites = SpriteSet()
     frames = {m: len(s.pixmaps) for m, s in sprites.sprites.items()}
     print(f"[selftest] sprites loaded: {sorted(sprites.sprites)} frames={frames}")
+    for m in ("type", "read", "think", "notify", "pet"):
+        # only require a mood when its gif is actually present, so an older
+        # sprites/ folder still runs (MOOD_FALLBACK covers the missing ones)
+        if (SPRITE_DIR / SPRITE_FILES[m]).is_file():
+            assert m in sprites.sprites, f"sprite {m!r} not loaded"
     print(f"[selftest] by_model (5h): {snap.by_model}")
 
     pet = PetWidget(None)
@@ -3324,13 +3481,32 @@ def run_selftest() -> int:
     pet.set_pct(10)
     pet.set_activity(("working", "Bash"))
     assert pet.mood == "focus"
+    pet.set_activity(("working", "Edit"))      # tool picks the animation
+    assert pet.mood == "type"
+    pet.set_activity(("working", "Read"))
+    assert pet.mood == "read"
+    pet.set_activity(("working", None))        # thinking (no tool)
+    assert pet.mood == "think"
+    pet.set_activity(("needs_input", None))    # Claude asks you
+    assert pet.mood == "notify"
     pet.set_activity(("waiting", None))
     assert pet.mood == "happy"
     pet.set_pct(90)                      # quota alarm overrides activity
     assert pet.mood == "panic"
+    pet.set_pct(100)
+    pet.set_activity(("working", "Edit"))
+    assert pet.mood == "limit"           # over-limit overrides the tool mood
     pet.set_pct(10)
     pet.set_activity(None)
     assert pet.mood == "chill"
+    # petting reaction briefly overrides the mood, then reverts
+    if "pet" in pet._sprites.sprites:
+        pet._play_reaction()
+        assert pet._react_active and pet.mood == "pet"
+        pet.set_activity(("working", "Edit"))  # ignored while reacting
+        assert pet.mood == "pet"
+        pet._end_reaction()
+        assert not pet._react_active and pet.mood == "type"
     print("[selftest] activity mood combination OK")
 
     # language toggle: strings and number formatting switch together
@@ -3507,7 +3683,53 @@ def run_selftest() -> int:
     panel.set_task(None)
     panel.update_snapshot(snap)
     assert panel.task_title.isHidden(), "task section shown while idle"
+    assert panel._task_action == "", "stale task action kept after idle"
+    panel._render_task_activity()        # the 1 s countdown tick must not re-show it
+    assert not panel.task_activity.text(), "orphaned activity line re-shown after idle"
     print("[selftest] session context / task view OK")
+
+    # turn timer formatting + live rendering in the activity line
+    assert _fmt_dur(5) == "0:05" and _fmt_dur(74) == "1:14"
+    assert _fmt_dur(3661) == "1:01:01"
+    work_ctx = SessionContext(kind="working", tool="Edit", detail="foo.py",
+                              task="do the thing", project="demo")
+    panel.set_task(work_ctx, work_since=time.monotonic() - 90)
+    assert "· 1:" in panel.task_activity.text(), \
+        f"turn timer missing: {panel.task_activity.text()!r}"
+    panel.set_task(work_ctx, work_since=None)      # no timer without a start
+    assert "·" not in panel.task_activity.text().split("foo.py")[-1]
+    # the "your turn" alert is rate-limited and safe without a tray
+    assert capp._work_kind is None and capp._last_alert_mono == 0.0
+    assert isinstance(capp.notify_sound, bool)
+    capp._fire_alert("t", "x")            # tray is None -> must not raise
+    capp._alert_turn_done(5.0)            # below threshold -> no-op
+
+    # cross-session guard: a newest-log switch from a working session to a
+    # different waiting session must NOT fire a turn-done alert
+    fired = []
+    capp._alert_turn_done = lambda e: fired.append(e)
+    with tempfile.TemporaryDirectory() as td:
+        la, lb = Path(td) / "a.jsonl", Path(td) / "b.jsonl"
+        la.write_text(json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "x"}}]}}) + "\n",
+            encoding="utf-8")
+        lb.write_text(json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "done"}]}}) + "\n", encoding="utf-8")
+        capp._work_kind = None
+        capp._work_started_mono = None
+        capp._work_log = None
+        capp._newest_log = la
+        capp._check_activity()            # session A is working
+        assert capp._work_kind == "working" and capp._work_log == la
+        capp._newest_log = lb
+        capp._check_activity()            # switch to waiting session B -> no alert
+        assert not fired, "spurious cross-session turn-done alert"
+        capp._work_kind = "working"
+        capp._work_log = lb
+        capp._work_started_mono = time.monotonic() - 30
+        capp._check_activity()            # B's own working->waiting -> alert
+        assert fired and fired[-1] >= 20, "same-session turn-end not detected"
+    print("[selftest] turn timer + your-turn alert OK")
 
     print("[selftest] OK")
     del app

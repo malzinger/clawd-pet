@@ -31,6 +31,7 @@ Platform notes
       background (KDE/GNOME default compositors are fine).
 """
 
+import bisect
 import functools
 import json
 import math
@@ -102,7 +103,8 @@ from PyQt5.QtWidgets import (
 # Claude itself displays; the result is stored in QSettings and wins over this.
 MAX_TOKENS = 88_000                # placeholder default (Max 5x plan)
 PLAN_NAME = "Max 5x"               # shown in the panel header
-WINDOW_HOURS = 5                   # rolling quota window in hours
+WINDOW_HOURS = 5                   # length of Anthropic's fixed session window
+REPLAY_HOURS = 48                  # look-back to reconstruct the window chain
 SCAN_INTERVAL_MS = 20_000          # how often the logs are rescanned
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
@@ -239,15 +241,45 @@ def pretty_model(model_id: str) -> str:
     return model_id
 
 
-def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapshot:
-    """Scan ~/.claude/projects/**/*.jsonl and sum token usage in the window.
+def _current_window_start(timestamps, now: datetime) -> Optional[datetime]:
+    """Replay Anthropic's chained fixed 5-hour windows over activity times.
 
+    A window opens with the first message while no window is active and lasts
+    exactly WINDOW_HOURS; under continuous use the next window opens with the
+    first message after the previous one expired. Any silence of >= one window
+    length guarantees a fresh start, so the replay is anchored there.
+    """
+    if not timestamps:
+        return None
+    window = timedelta(hours=WINDOW_HOURS)
+    anchor = timestamps[0]
+    prev = timestamps[0]
+    for ts in timestamps[1:]:
+        if ts - prev >= window:
+            anchor = ts
+        prev = ts
+    start = anchor
+    while now >= start + window:
+        idx = bisect.bisect_left(timestamps, start + window)
+        if idx >= len(timestamps):
+            return None            # window expired and nothing started a new one
+        start = timestamps[idx]
+    return start
+
+
+def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapshot:
+    """Scan ~/.claude/projects/**/*.jsonl and sum the current session window.
+
+    Anthropic's 5-hour limit is a FIXED window (starts with the first message,
+    resets completely after 5 h — chained under continuous use), not a rolling
+    one. Entries of the last REPLAY_HOURS are collected to reconstruct the
+    window chain; only tokens since the current window start are counted.
     Streaming writes the same assistant message on several lines with an
     identical message id, so entries are deduplicated per id (keeping the
     line with the largest token count).
     """
     now = now or datetime.now(timezone.utc)
-    cutoff = now - timedelta(hours=WINDOW_HOURS)
+    cutoff = now - timedelta(hours=REPLAY_HOURS)
     snap = UsageSnapshot(updated_at=datetime.now())
 
     if not CLAUDE_PROJECTS_DIR.is_dir():
@@ -312,7 +344,13 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
         except OSError:
             continue
 
-    for inp, out, cr, cc, ts, model in list(by_msg_id.values()) + anonymous:
+    all_entries = list(by_msg_id.values()) + anonymous
+    window_start = _current_window_start(sorted(e[4] for e in all_entries), now)
+    snap.oldest = window_start          # countdown target: window_start + 5 h
+
+    for inp, out, cr, cc, ts, model in all_entries:
+        if window_start is None or ts < window_start:
+            continue                    # previous, already reset window
         snap.entries += 1
         snap.input_tokens += inp
         snap.output_tokens += out
@@ -320,8 +358,6 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
         snap.cache_creation += cc
         name = pretty_model(model)
         snap.by_model[name] = snap.by_model.get(name, 0) + inp + out
-        if snap.oldest is None or ts < snap.oldest:
-            snap.oldest = ts
 
     snap.total = snap.input_tokens + snap.output_tokens
     if COUNT_CACHE_READ:
@@ -2207,6 +2243,16 @@ def run_selftest() -> int:
           f"{effective_max_tokens()} Tokens Budget; live pct now {probe.pct:.1f}%")
     set_max_tokens_override(None)
     assert not is_calibrated()
+
+    # fixed-window replay: chained windows and fresh starts after silence
+    base = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    h = timedelta(hours=1)
+    chain = [base, base + 2 * h, base + 4 * h, base + 5 * h + h / 2, base + 6 * h]
+    assert _current_window_start(chain, base + 6 * h) == base + 5 * h + h / 2
+    fresh = [base, base + 12 * h]
+    assert _current_window_start(fresh, base + 12 * h + h / 2) == base + 12 * h
+    assert _current_window_start([base], base + 9 * h) is None
+    print("[selftest] window replay OK")
 
     # real-time activity: tail parser + hook registration on scratch files
     import tempfile

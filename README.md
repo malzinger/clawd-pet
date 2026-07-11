@@ -50,9 +50,11 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
 ## What it does
 
 - Scans your local Claude Code logs (`~/.claude/projects/**/*.jsonl`) every
-  20 seconds on a background thread and sums the tokens of the rolling
-  **5-hour quota window** (streaming duplicates are deduplicated).
-  Nothing ever leaves your machine — no account, no cloud.
+  20 seconds on a background thread, reconstructs Anthropic's **fixed 5-hour
+  session window** from the activity timestamps (it starts with your first
+  message and fully resets 5 h later — matching Claude's own display) and
+  sums only the tokens of the current window (streaming duplicates are
+  deduplicated). Nothing ever leaves your machine — no account, no cloud.
 - Click or hover Clawd for a Claude-style panel: 5-hour limit with progress
   bar, **per-model breakdown** (Fable, Opus, Sonnet, …) and a countdown until
   the window resets.

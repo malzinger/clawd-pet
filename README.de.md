@@ -64,6 +64,14 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
   Token-Kontingente nicht. Rechtsklick → „Limit kalibrieren …", den
   Prozentwert aus Claudes eigenem `/usage`-Popup eintippen — die App leitet
   daraus dein echtes Budget ab und speichert es.
+- **Burn-Rate-Prognose:** Das Panel rechnet hoch, wann du bei aktuellem
+  Tempo das Limit erreichst („Bei diesem Tempo: Limit ca. 16:40 Uhr") —
+  oder bestätigt, dass das Tempo bis zum Reset reicht.
+- **Benachrichtigungen:** Tray-Toasts beim Überschreiten von 80 % / 95 % und
+  beim Reset des 5-Stunden-Fensters („Budget wieder frisch!"). Im Tray-Menü
+  abschaltbar.
+- **Mit Windows starten:** Ein Häkchen im Tray-Menü registriert oder
+  entfernt den Autostart (nur Windows).
 - **Reagiert in Echtzeit:** Ein leichtgewichtiger Watcher verfolgt das neueste
   Session-Log — Clawd hämmert, während Claude Tools ausführt, freut sich, wenn
   der Turn fertig ist, und Sprechblasen verraten, was gerade passiert („führt
@@ -78,6 +86,8 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
   Tray-Menü → „Language/Sprache".
 - Frei per Drag verschiebbar, Position wird gemerkt. Tray-Icon mit manuellem
   Refresh, Verstecken und Beenden.
+- Es läuft immer nur eine Instanz — startest du die exe erneut, sagt sie dir
+  nur, dass Clawd schon auf deinem Desktop sitzt.
 
 ## Plattform-Hinweise
 

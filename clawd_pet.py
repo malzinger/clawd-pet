@@ -39,6 +39,7 @@ import os
 import random
 import shutil
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -50,6 +51,7 @@ from typing import Optional
 from PyQt5.QtCore import (
     QEasingCurve,
     QElapsedTimer,
+    QLockFile,
     QParallelAnimationGroup,
     QPoint,
     QPropertyAnimation,
@@ -156,6 +158,16 @@ USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 ORG_NAME = "ClawdPet"
 APP_NAME = "Clawd"
 
+# --- Burn-rate forecast + threshold notifications ----------------------------
+BURN_LOOKBACK_S = 3600      # forecast fits over at most the last hour
+BURN_MIN_SPAN_S = 300       # ... but needs at least 5 minutes of samples
+NOTIFY_THRESHOLDS = (95.0, 80.0)   # toast on upward crossings, highest wins
+
+# --- Autostart (Windows Run key, toggled via the tray menu) ------------------
+AUTOSTART_REG_PATH = (r"HKEY_CURRENT_USER\Software\Microsoft"
+                      r"\Windows\CurrentVersion\Run")
+AUTOSTART_REG_NAME = "ClawdPet"
+
 
 # ======================================================================
 #  Usage scanning (pure logic, no Qt) — runs on a worker thread
@@ -187,6 +199,7 @@ class UsageSnapshot:
     week_weighted: float = 0.0
     by_model_weighted: dict = field(default_factory=dict)
     week_by_model_weighted: dict = field(default_factory=dict)
+    burn_eta: Optional[datetime] = None           # projected time of hitting 100 %
 
 
 _MAX_TOKENS_OVERRIDE: Optional[int] = None      # set once manually calibrated
@@ -863,6 +876,77 @@ MOOD_COLORS = {
 
 _LANG = "de"
 
+def burn_eta(samples, limit: float = 100.0) -> Optional[datetime]:
+    """Linear burn-rate forecast: when does usage hit the limit?
+
+    samples: (utc datetime, pct) tuples, oldest first, all from the current
+    session window. Returns the projected UTC time of reaching `limit`, or
+    None while there is too little data or usage is flat/falling.
+    """
+    if len(samples) < 2:
+        return None
+    (t0, p0), (t1, p1) = samples[0], samples[-1]
+    span = (t1 - t0).total_seconds()
+    if span < BURN_MIN_SPAN_S or p1 <= p0 or p1 >= limit:
+        return None
+    rate = (p1 - p0) / span                       # pct per second
+    return t1 + timedelta(seconds=(limit - p1) / rate)
+
+
+def notify_decision(prev: Optional[float], cur: float) -> Optional[str]:
+    """Map a pct transition between two scans to a notification key (or None).
+
+    A big downward jump after real usage means the 5-hour window reset;
+    upward crossings of the warning thresholds fire once each, highest wins.
+    """
+    if prev is None:
+        return None
+    if prev >= 50.0 and cur < prev - 40.0:
+        return "reset"
+    for th in NOTIFY_THRESHOLDS:
+        if prev < th <= cur:
+            return f"warn{int(th)}"
+    return None
+
+
+def autostart_supported() -> bool:
+    return sys.platform == "win32"
+
+
+def autostart_command() -> Optional[str]:
+    """Command line the Windows Run key should launch at login."""
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}"'
+    script = Path(__file__).resolve()
+    for runner in ("pythonw", "pyw", "python", "py"):
+        exe = shutil.which(runner)
+        if exe:
+            return f'"{exe}" "{script}"'
+    return None
+
+
+def autostart_enabled() -> bool:
+    if not autostart_supported():
+        return False
+    reg = QSettings(AUTOSTART_REG_PATH, QSettings.NativeFormat)
+    return bool(reg.value(AUTOSTART_REG_NAME))
+
+
+def set_autostart(enabled: bool) -> bool:
+    if not autostart_supported():
+        return False
+    command = autostart_command()
+    if enabled and not command:
+        return False
+    reg = QSettings(AUTOSTART_REG_PATH, QSettings.NativeFormat)
+    if enabled:
+        reg.setValue(AUTOSTART_REG_NAME, command)
+    else:
+        reg.remove(AUTOSTART_REG_NAME)
+    reg.sync()
+    return reg.status() == QSettings.NoError
+
+
 STRINGS = {
     "de": {
         "panel_title": "Plan-Nutzungslimits · {plan}",
@@ -927,6 +1011,20 @@ STRINGS = {
         "err_dir": "Log-Verzeichnis nicht gefunden: {p}",
         "err_logs": "Logs nicht lesbar: {e}",
         "err_scan": "Scan-Fehler: {e}",
+        "menu_notify_on": "Benachrichtigungen aktivieren",
+        "menu_notify_off": "Benachrichtigungen deaktivieren",
+        "menu_autostart": "Mit Windows starten",
+        "forecast_eta": "Bei diesem Tempo: Limit ca. {t} Uhr",
+        "forecast_ok": "Tempo reicht bis zum Reset ✓",
+        "notify_warn80_title": "Clawd wird nervös",
+        "notify_warn80_text": "80 % des 5-Stunden-Limits sind verbraucht.",
+        "notify_warn95_title": "Clawd ist in Panik!",
+        "notify_warn95_text": "95 % verbraucht — gleich ist Schluss.",
+        "notify_reset_title": "Budget wieder frisch!",
+        "notify_reset_text": "Das 5-Stunden-Fenster wurde zurückgesetzt.",
+        "single_title": "Clawd läuft bereits",
+        "single_text": "Eine andere Clawd-Instanz läuft schon –\n"
+                       "schau ins Tray oder auf deinen Desktop.",
     },
     "en": {
         "panel_title": "Plan usage limits · {plan}",
@@ -991,6 +1089,20 @@ STRINGS = {
         "err_dir": "Log directory not found: {p}",
         "err_logs": "Logs unreadable: {e}",
         "err_scan": "Scan error: {e}",
+        "menu_notify_on": "Enable notifications",
+        "menu_notify_off": "Disable notifications",
+        "menu_autostart": "Start with Windows",
+        "forecast_eta": "At this pace: limit around {t}",
+        "forecast_ok": "Current pace lasts until the reset ✓",
+        "notify_warn80_title": "Clawd is getting nervous",
+        "notify_warn80_text": "80 % of the 5-hour limit is used.",
+        "notify_warn95_title": "Clawd is panicking!",
+        "notify_warn95_text": "95 % used — almost out.",
+        "notify_reset_title": "Fresh budget!",
+        "notify_reset_text": "The 5-hour window has reset.",
+        "single_title": "Clawd is already running",
+        "single_text": "Another Clawd instance is already running –\n"
+                       "check the tray or your desktop.",
     },
 }
 
@@ -1766,6 +1878,10 @@ class PanelWidget(QWidget):
         self.detail_label.setObjectName("sub")
         self.detail_label.setWordWrap(True)
         lay.addWidget(self.detail_label)
+        self.forecast_label = QLabel("")
+        self.forecast_label.setObjectName("sub")
+        self.forecast_label.setWordWrap(True)
+        lay.addWidget(self.forecast_label)
         self.updated_label = QLabel("Zuletzt aktualisiert: –")
         self.updated_label.setObjectName("note")
         lay.addWidget(self.updated_label)
@@ -1922,6 +2038,7 @@ class PanelWidget(QWidget):
             self.detail_label.setText(
                 tr("detail_used", n=fmt_de(snap.total), hint=hint))
         self.detail_label.setVisible(bool(self.detail_label.text()))
+        self._update_forecast(snap)
         if snap.updated_at:
             src = tr("src_live") if snap.source == "api" else tr("src_local")
             self.updated_label.setText(
@@ -1934,6 +2051,25 @@ class PanelWidget(QWidget):
         self.layout().invalidate()
         self.layout().activate()
         self.adjustSize()
+
+    def _update_forecast(self, snap: UsageSnapshot):
+        """Burn-rate line: projected time of hitting the 5-hour limit."""
+        reset_at = None
+        if snap.source == "api":
+            for b in snap.buckets:
+                if b.key == "five_hour":
+                    reset_at = b.resets_at
+        elif snap.oldest is not None:
+            reset_at = snap.oldest + timedelta(hours=WINDOW_HOURS)
+        eta = snap.burn_eta
+        if eta is None or snap.error or snap.pct >= 100.0:
+            self.forecast_label.setText("")
+        elif reset_at is not None and eta >= reset_at:
+            self.forecast_label.setText(tr("forecast_ok"))
+        else:
+            self.forecast_label.setText(
+                tr("forecast_eta", t=eta.astimezone().strftime("%H:%M")))
+        self.forecast_label.setVisible(bool(self.forecast_label.text()))
 
     def _refresh_countdown(self):
         snap = self._snap
@@ -2150,6 +2286,14 @@ class ClawdApp:
 
         # real-time activity: log watcher (Stufe 1) + hook receiver (Stufe 2)
         self.quiet = self.settings.value("quiet", False, type=bool)
+        self.notify_enabled = self.settings.value("notify", True, type=bool)
+        # burn-rate history and last pct are kept PER SOURCE ("api"/"logs"):
+        # the two modes report on different absolute scales, so cross-comparing
+        # them would fake resets — but a transient api->logs->api fallback (an
+        # expired OAuth token, a network blip) must not wipe either history, or
+        # the forecast and the threshold toasts would go dark for minutes.
+        self._burn_samples = {}          # source -> list[(utc time, pct)]
+        self._prev_pct = {}              # source -> last pct seen
         self._newest_log: Optional[Path] = None
         self._last_activity = None
         self._hook_hold_until = 0.0
@@ -2238,6 +2382,11 @@ class ClawdApp:
         act_quiet.triggered.connect(self.toggle_quiet)
         menu.addAction(act_quiet)
 
+        act_notify = QAction(tr("menu_notify_off") if self.notify_enabled
+                             else tr("menu_notify_on"), menu)
+        act_notify.triggered.connect(self.toggle_notify)
+        menu.addAction(act_notify)
+
         if hooks_registered(CLAUDE_SETTINGS_FILE):
             act_hooks = QAction(tr("menu_hooks_off"), menu)
             act_hooks.triggered.connect(self.disable_hooks)
@@ -2257,6 +2406,13 @@ class ClawdApp:
         act_lang = QAction(tr("menu_lang"), menu)
         act_lang.triggered.connect(self.toggle_language)
         menu.addAction(act_lang)
+
+        if autostart_supported():
+            act_auto = QAction(tr("menu_autostart"), menu)
+            act_auto.setCheckable(True)
+            act_auto.setChecked(autostart_enabled())
+            act_auto.triggered.connect(self.toggle_autostart)
+            menu.addAction(act_auto)
         menu.addSeparator()
 
         if self.tray is not None:   # without a tray there is no way to un-hide
@@ -2302,6 +2458,16 @@ class ClawdApp:
     def _on_scan_result(self, snap: UsageSnapshot):
         self.snapshot = snap
         self._newest_log = Path(snap.newest_file) if snap.newest_file else None
+        if not snap.error:
+            now = datetime.now(timezone.utc)
+            samples = self._burn_samples.setdefault(snap.source, [])
+            if samples and snap.pct < samples[-1][1] - 1.0:
+                samples.clear()             # window reset — old rate is void
+            samples.append((now, snap.pct))
+            cutoff = now - timedelta(seconds=BURN_LOOKBACK_S)
+            samples[:] = [s for s in samples if s[0] >= cutoff]
+            snap.burn_eta = burn_eta(samples)
+            self._notify_transition(snap.source, snap.pct)
         cal = auto_calibration()          # persist budgets learned from live syncs
         if cal["budget_5h"]:
             self.settings.setValue("auto_budget_5h", cal["budget_5h"])
@@ -2419,6 +2585,32 @@ class ClawdApp:
         if self.quiet:
             self.bubble.hide()
         self._rebuild_tray_menu()
+
+    def toggle_notify(self):
+        self.notify_enabled = not self.notify_enabled
+        self.settings.setValue("notify", self.notify_enabled)
+        self._rebuild_tray_menu()
+
+    def toggle_autostart(self):
+        set_autostart(not autostart_enabled())
+        self._rebuild_tray_menu()
+
+    def _notify_transition(self, source: str, pct: float):
+        """Fire a tray toast when a scan crosses 80/95 % or the window resets.
+
+        The previous pct is tracked per source so a transient api<->logs
+        fallback neither drops a threshold toast nor fakes a reset from the
+        level difference between the two modes.
+        """
+        prev = self._prev_pct.get(source)
+        self._prev_pct[source] = pct
+        kind = notify_decision(prev, pct)
+        if kind is None or self.tray is None or not self.notify_enabled:
+            return
+        icon = (QSystemTrayIcon.Information if kind == "reset"
+                else QSystemTrayIcon.Warning)
+        self.tray.showMessage(tr(f"notify_{kind}_title"),
+                              tr(f"notify_{kind}_text"), icon, 6000)
 
     def enable_hooks(self):
         command = hook_command()
@@ -2687,6 +2879,59 @@ def run_selftest() -> int:
     assert mood_for_pct(49.9) == "chill" and mood_for_pct(50) == "focus"
     assert mood_for_pct(80) == "panic" and mood_for_pct(100) == "limit"
 
+    # burn-rate forecast: linear projection to 100 %
+    b0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    m = timedelta(minutes=1)
+    eta = burn_eta([(b0, 40.0), (b0 + 20 * m, 50.0)])
+    assert eta == b0 + 120 * m, f"burn eta wrong: {eta}"   # 0.5 %/min -> +100 min
+    assert burn_eta([(b0, 40.0), (b0 + 2 * m, 50.0)]) is None    # span too short
+    assert burn_eta([(b0, 50.0), (b0 + 20 * m, 45.0)]) is None   # usage falling
+    assert burn_eta([(b0, 50.0)]) is None
+    now_utc = datetime.now(timezone.utc)
+    snap_fc = UsageSnapshot(updated_at=datetime.now(), pct=50.0,
+                            oldest=now_utc - timedelta(hours=1),
+                            burn_eta=now_utc + timedelta(hours=1))
+    panel.update_snapshot(snap_fc)
+    assert panel.forecast_label.text(), "forecast line missing"
+    snap_fc.burn_eta = now_utc + timedelta(hours=9)   # past the window reset
+    panel.update_snapshot(snap_fc)
+    assert panel.forecast_label.text() == tr("forecast_ok")
+    print("[selftest] burn-rate forecast OK")
+
+    # notifications: threshold crossings and window-reset detection
+    assert notify_decision(None, 85.0) is None       # no toast right at startup
+    assert notify_decision(75.0, 85.0) == "warn80"
+    assert notify_decision(85.0, 96.0) == "warn95"
+    assert notify_decision(79.0, 96.0) == "warn95"   # highest threshold wins
+    assert notify_decision(81.0, 82.0) is None
+    assert notify_decision(76.0, 3.0) == "reset"
+    assert notify_decision(30.0, 3.0) is None
+    for kind in ("warn80", "warn95", "reset"):
+        assert tr(f"notify_{kind}_title") and tr(f"notify_{kind}_text")
+    print("[selftest] notification decisions OK")
+
+    # per-source state: a transient api<->logs fallback must not wipe the
+    # other source's history (else the forecast blanks and toasts never fire)
+    capp = ClawdApp(app, with_tray=False)
+    capp._notify_transition("api", 78.0)
+    assert capp._prev_pct.get("api") == 78.0
+    capp._notify_transition("logs", 40.0)          # transient fallback blip
+    assert capp._prev_pct.get("api") == 78.0       # api lineage untouched
+    assert capp._prev_pct.get("logs") == 40.0
+    # so on return to api the crossing is judged 78 -> 82, not None -> 82
+    assert notify_decision(capp._prev_pct.get("api"), 82.0) == "warn80"
+    capp._burn_samples.setdefault("api", []).append(
+        (datetime.now(timezone.utc), 78.0))
+    capp._notify_transition("logs", 41.0)
+    assert capp._burn_samples.get("api"), "api burn history wiped by logs blip"
+    print("[selftest] per-source burn/notify state OK")
+
+    # autostart: command resolvable, registry read only (no write in a test)
+    if autostart_supported():
+        assert autostart_command(), "no autostart runner found"
+        assert isinstance(autostart_enabled(), bool)
+    print("[selftest] autostart OK")
+
     print("[selftest] OK")
     del app
     return 0
@@ -2704,6 +2949,16 @@ def main() -> int:
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(ORG_NAME)
     app.setWindowIcon(make_app_icon())
+
+    # Single-instance guard: a second pet would fight over the hook UDP port
+    # and keep the exe locked during updates. QLockFile stores the owner PID,
+    # so a lock left behind by a crash is detected as stale and removed.
+    set_language(str(QSettings(ORG_NAME, APP_NAME).value("language", "de") or "de"))
+    lock = QLockFile(str(Path(tempfile.gettempdir()) / "clawd_pet.lock"))
+    lock.setStaleLockTime(0)               # the pet runs for days — never age out
+    if not lock.tryLock(100):
+        QMessageBox.information(None, tr("single_title"), tr("single_text"))
+        return 0
 
     controller = ClawdApp(app)
     controller.start()

@@ -61,6 +61,13 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
 - **Self-calibrating:** Anthropic does not publish the actual token quotas, so
   right-click → "Limit kalibrieren …", type in the percentage Claude's own
   `/usage` popup shows — the app derives your real budget from it and stores it.
+- **Burn-rate forecast:** the panel projects when you would hit the limit at
+  your current pace ("At this pace: limit around 16:40") — or confirms the
+  pace lasts until the reset.
+- **Notifications:** tray toasts when usage crosses 80 % / 95 % and when the
+  5-hour window resets ("Fresh budget!"). Toggle via the tray menu.
+- **Start with Windows:** a tray-menu checkbox registers or removes
+  autostart (Windows only).
 - **Reacts in real time:** a lightweight watcher follows the newest session
   log — Clawd hammers away while Claude runs tools, turns happy when the turn
   finishes, and speech bubbles announce what is happening ("führt Befehle
@@ -74,6 +81,8 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
   formats) switches between English and German — tray menu → "Sprache/Language".
 - Drag him anywhere; the position is remembered. Tray icon with manual
   refresh, hide and quit.
+- Only one instance runs at a time — starting the exe again simply tells you
+  Clawd is already on your desktop.
 
 ## Platform notes
 

@@ -394,7 +394,7 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
     snap = UsageSnapshot(updated_at=datetime.now())
 
     if not CLAUDE_PROJECTS_DIR.is_dir():
-        snap.error = f"Log-Verzeichnis nicht gefunden: {CLAUDE_PROJECTS_DIR}"
+        snap.error = tr("err_dir", p=CLAUDE_PROJECTS_DIR)
         return snap
 
     by_msg_id = {}
@@ -404,7 +404,7 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
     try:
         files = list(CLAUDE_PROJECTS_DIR.rglob("*.jsonl"))
     except OSError as exc:
-        snap.error = f"Logs nicht lesbar: {exc}"
+        snap.error = tr("err_logs", e=exc)
         return snap
 
     for fp in files:
@@ -473,7 +473,7 @@ class ScanThread(QThread):
         try:
             snap = collect_usage(should_stop=self.isInterruptionRequested)
         except Exception as exc:  # never let the worker die silently
-            snap = UsageSnapshot(error=f"Scan-Fehler: {exc}", updated_at=datetime.now())
+            snap = UsageSnapshot(error=tr("err_scan", e=exc), updated_at=datetime.now())
         self.result.emit(snap)
 
 
@@ -490,14 +490,15 @@ class UsageBucket:
     resets_at: Optional[datetime]
 
 
-BUCKET_LABELS = {
-    "five_hour": "5-Stunden-Limit",
-    "seven_day": "Wöchentlich · alle Modelle",
-    "seven_day_opus": "Wöchentlich · Opus",
-    "seven_day_sonnet": "Wöchentlich · Sonnet",
-    "seven_day_fable": "Wöchentlich · Fable",
-    "seven_day_oauth_apps": "Wöchentlich · Apps",
-}
+def bucket_label(key: str) -> str:
+    if key == "five_hour":
+        return tr("row_5h")
+    if key == "seven_day":
+        return tr("row_week_all")
+    if key.startswith("seven_day_"):
+        name = key[len("seven_day_"):].replace("_", " ").title()
+        return tr("row_week_model", name=name)
+    return key.replace("_", " ").title()
 
 
 def _get_access_token() -> Optional[str]:
@@ -550,11 +551,12 @@ def fetch_api_usage() -> Optional[list]:
             model = scope.get("model") if isinstance(scope.get("model"), dict) else {}
             display = model.get("display_name")
             if kind == "session":
-                key, label = "five_hour", "5-Stunden-Limit"
+                key, label = "five_hour", tr("row_5h")
             elif kind == "weekly_all":
-                key, label = "seven_day", "Wöchentlich · alle Modelle"
+                key, label = "seven_day", tr("row_week_all")
             elif isinstance(display, str) and display:
-                key, label = f"weekly_{display.lower()}", f"Wöchentlich · {display}"
+                key, label = (f"weekly_{display.lower()}",
+                              tr("row_week_model", name=display))
             else:
                 key = kind or "unknown"
                 label = (kind or "Limit").replace("_", " ").title()
@@ -578,9 +580,8 @@ def fetch_api_usage() -> Optional[list]:
                 resets_at = datetime.fromtimestamp(resets, tz=timezone.utc)
             else:
                 resets_at = _parse_iso_ts(resets)
-            label = BUCKET_LABELS.get(
-                key, key.replace("seven_day_", "Wöchentlich · ").replace("_", " ").title())
-            buckets.append(UsageBucket(key=key, label=label, pct=pct, resets_at=resets_at))
+            buckets.append(UsageBucket(key=key, label=bucket_label(key),
+                                       pct=pct, resets_at=resets_at))
 
     order = {"five_hour": 0, "seven_day": 1}
     buckets.sort(key=lambda b: order.get(b.key, 2))
@@ -632,15 +633,15 @@ def _fmt_reset(resets_at: Optional[datetime]) -> str:
         return ""
     secs = int((resets_at - datetime.now(timezone.utc)).total_seconds())
     if secs <= 0:
-        return "Zurücksetzung läuft …"
+        return tr("reset_running")
     if secs < 24 * 3600:
         h, m = divmod(secs // 60, 60)
         if h:
-            return f"Zurücksetzung in {h} Std. {m:02d} Min."
-        return f"Zurücksetzung in {m} Min."
+            return tr("reset_in_hm", h=h, m=m)
+        return tr("reset_in_m", m=m)
     local = resets_at.astimezone()
-    wd = ("Mo.", "Di.", "Mi.", "Do.", "Fr.", "Sa.", "So.")[local.weekday()]
-    return f"Zurücksetzung {wd}, {local.strftime('%H:%M')}"
+    wd = tr("weekdays")[local.weekday()]
+    return tr("reset_at", wd=wd, t=local.strftime("%H:%M"))
 
 
 # ======================================================================
@@ -648,20 +649,41 @@ def _fmt_reset(resets_at: Optional[datetime]) -> str:
 # ======================================================================
 
 TOOL_BUBBLES = {
-    "Read": "liest Dateien …",
-    "Edit": "schreibt Code …",
-    "Write": "schreibt Code …",
-    "MultiEdit": "schreibt Code …",
-    "NotebookEdit": "schreibt Code …",
-    "Bash": "führt Befehle aus …",
-    "PowerShell": "führt Befehle aus …",
-    "Grep": "durchsucht den Code …",
-    "Glob": "durchsucht den Code …",
-    "Task": "delegiert an Agenten …",
-    "Agent": "delegiert an Agenten …",
-    "WebFetch": "surft im Web …",
-    "WebSearch": "surft im Web …",
+    "de": {
+        "Read": "liest Dateien …",
+        "Edit": "schreibt Code …",
+        "Write": "schreibt Code …",
+        "MultiEdit": "schreibt Code …",
+        "NotebookEdit": "schreibt Code …",
+        "Bash": "führt Befehle aus …",
+        "PowerShell": "führt Befehle aus …",
+        "Grep": "durchsucht den Code …",
+        "Glob": "durchsucht den Code …",
+        "Task": "delegiert an Agenten …",
+        "Agent": "delegiert an Agenten …",
+        "WebFetch": "surft im Web …",
+        "WebSearch": "surft im Web …",
+    },
+    "en": {
+        "Read": "reading files …",
+        "Edit": "writing code …",
+        "Write": "writing code …",
+        "MultiEdit": "writing code …",
+        "NotebookEdit": "writing code …",
+        "Bash": "running commands …",
+        "PowerShell": "running commands …",
+        "Grep": "searching the code …",
+        "Glob": "searching the code …",
+        "Task": "delegating to agents …",
+        "Agent": "delegating to agents …",
+        "WebFetch": "browsing the web …",
+        "WebSearch": "browsing the web …",
+    },
 }
+
+
+def tool_bubble(tool) -> Optional[str]:
+    return TOOL_BUBBLES.get(_LANG, TOOL_BUBBLES["de"]).get(tool or "")
 
 
 def read_last_activity(path: Path, now: Optional[datetime] = None):
@@ -824,13 +846,170 @@ MOOD_COLORS = {
 }
 
 
+# ======================================================================
+#  Language / i18n — toggled via the tray menu, persisted in QSettings
+# ======================================================================
+
+_LANG = "de"
+
+STRINGS = {
+    "de": {
+        "panel_title": "Plan-Nutzungslimits · {plan}",
+        "row_5h": "5-Stunden-Limit",
+        "row_week_all": "Wöchentlich · alle Modelle",
+        "row_week_model": "Wöchentlich · {name}",
+        "tokens_n": "{n} Tokens",
+        "tokens_inout": "{n} Tokens (In + Out)",
+        "rolling7": "≈ letzte 7 Tage",
+        "reset_running": "Zurücksetzung läuft …",
+        "reset_in_hm": "Zurücksetzung in {h} Std. {m:02d} Min.",
+        "reset_in_m": "Zurücksetzung in {m} Min.",
+        "reset_at": "Zurücksetzung {wd}, {t}",
+        "weekdays": ("Mo.", "Di.", "Mi.", "Do.", "Fr.", "Sa.", "So."),
+        "detail_used": "{n} Tokens verbraucht (Input + Output) · {hint}",
+        "hint_manual": "Limit kalibriert",
+        "hint_auto": "Limits automatisch kalibriert",
+        "hint_placeholder": "Platzhalter-Limit – im Tray-Menü kalibrieren",
+        "detail_local": "Lokal gezählt (5-h-Fenster): {parts} Tokens",
+        "updated": "Zuletzt aktualisiert: {t} ({src})",
+        "src_live": "live",
+        "src_local": "lokal",
+        "tooltip_wait": "Clawd wartet auf die ersten Daten …",
+        "tooltip_api": "Claude-Nutzung (5-h-Fenster): {p}",
+        "tooltip_est": "Claude-Nutzung (Schätzung): {p}  ({n} Tokens verbraucht)",
+        "tray_title": "Clawd – Claude Code Nutzung",
+        "tray_tooltip": "Clawd – {p}  ({n} Tokens verbraucht)",
+        "bubble_done": "Fertig! Wartet auf dich.",
+        "bubble_input": "Claude wartet auf deine Eingabe!",
+        "bubble_session": "Neue Claude-Session gestartet",
+        "menu_refresh": "Jetzt aktualisieren",
+        "menu_panel": "Panel öffnen/schließen",
+        "menu_quiet_on": "Sprechblasen einblenden",
+        "menu_quiet_off": "Sprechblasen ausblenden",
+        "menu_hooks_on": "Echtzeit-Hooks aktivieren (Beta)",
+        "menu_hooks_off": "Echtzeit-Hooks deaktivieren",
+        "menu_cal": "Limit kalibrieren …",
+        "menu_cal_reset": "Kalibrierung zurücksetzen",
+        "menu_lang": "Language: English",
+        "menu_show": "Clawd anzeigen/verstecken",
+        "menu_quit": "Beenden",
+        "cal_api_title": "Kalibrierung nicht nötig",
+        "cal_api_text": "Die App bezieht gerade die echten Prozentwerte direkt "
+                        "von Anthropic. Eine Kalibrierung ändert daran nichts.",
+        "cal_nodata_title": "Keine Daten",
+        "cal_nodata_text": "Im aktuellen 5-Stunden-Fenster wurden keine Tokens "
+                           "gezählt.\nNutze Claude Code kurz und versuche es erneut.",
+        "cal_prompt_title": "Limit kalibrieren",
+        "cal_prompt_text": "Öffne in Claude Code das Nutzungs-Popup (Befehl /usage).\n"
+                           "Welchen Prozentwert zeigt dort das 5-Stunden-Limit?\n\n"
+                           "Clawd hat im selben Fenster {n} Tokens gezählt.",
+        "cal_done_title": "Kalibriert",
+        "cal_done_text": "Dein 5-Stunden-Kontingent liegt bei etwa {n} Tokens.\n"
+                         "Clawds Anzeige entspricht ab jetzt Claudes eigener.",
+        "hooks_py_title": "Python benötigt",
+        "hooks_py_text": "Für Echtzeit-Hooks wird eine Python-Installation benötigt\n"
+                         "(pythonw/py im PATH). Der Log-Watcher läuft trotzdem weiter.",
+        "hooks_on_title": "Hooks aktiviert",
+        "hooks_on_text": "Clawd reagiert ab der nächsten Claude-Code-Session sofort\n"
+                         "auf Ereignisse — inklusive „Claude wartet auf deine "
+                         "Eingabe“.\n\nBackup der Einstellungen: {f}",
+        "err_dir": "Log-Verzeichnis nicht gefunden: {p}",
+        "err_logs": "Logs nicht lesbar: {e}",
+        "err_scan": "Scan-Fehler: {e}",
+    },
+    "en": {
+        "panel_title": "Plan usage limits · {plan}",
+        "row_5h": "5-hour limit",
+        "row_week_all": "Weekly · all models",
+        "row_week_model": "Weekly · {name}",
+        "tokens_n": "{n} tokens",
+        "tokens_inout": "{n} tokens (in + out)",
+        "rolling7": "≈ last 7 days",
+        "reset_running": "Resetting …",
+        "reset_in_hm": "Resets in {h} h {m:02d} min",
+        "reset_in_m": "Resets in {m} min",
+        "reset_at": "Resets {wd}, {t}",
+        "weekdays": ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"),
+        "detail_used": "{n} tokens used (input + output) · {hint}",
+        "hint_manual": "Limit calibrated",
+        "hint_auto": "Limits auto-calibrated",
+        "hint_placeholder": "Placeholder limit – calibrate via the tray menu",
+        "detail_local": "Locally counted (5 h window): {parts} tokens",
+        "updated": "Last updated: {t} ({src})",
+        "src_live": "live",
+        "src_local": "local",
+        "tooltip_wait": "Clawd is waiting for first data …",
+        "tooltip_api": "Claude usage (5 h window): {p}",
+        "tooltip_est": "Claude usage (estimate): {p}  ({n} tokens used)",
+        "tray_title": "Clawd – Claude Code usage",
+        "tray_tooltip": "Clawd – {p}  ({n} tokens used)",
+        "bubble_done": "Done! Waiting for you.",
+        "bubble_input": "Claude is waiting for your input!",
+        "bubble_session": "New Claude session started",
+        "menu_refresh": "Refresh now",
+        "menu_panel": "Toggle panel",
+        "menu_quiet_on": "Show speech bubbles",
+        "menu_quiet_off": "Hide speech bubbles",
+        "menu_hooks_on": "Enable real-time hooks (beta)",
+        "menu_hooks_off": "Disable real-time hooks",
+        "menu_cal": "Calibrate limit …",
+        "menu_cal_reset": "Reset calibration",
+        "menu_lang": "Sprache: Deutsch",
+        "menu_show": "Show/hide Clawd",
+        "menu_quit": "Quit",
+        "cal_api_title": "No calibration needed",
+        "cal_api_text": "The app is currently getting the exact percentages "
+                        "straight from Anthropic. Calibration would not change that.",
+        "cal_nodata_title": "No data",
+        "cal_nodata_text": "No tokens were counted in the current 5-hour window.\n"
+                           "Use Claude Code briefly and try again.",
+        "cal_prompt_title": "Calibrate limit",
+        "cal_prompt_text": "Open the usage popup in Claude Code (/usage command).\n"
+                           "What percentage does the 5-hour limit show there?\n\n"
+                           "Clawd counted {n} tokens in the same window.",
+        "cal_done_title": "Calibrated",
+        "cal_done_text": "Your 5-hour budget is roughly {n} tokens.\n"
+                         "Clawd's display now matches Claude's own.",
+        "hooks_py_title": "Python required",
+        "hooks_py_text": "Real-time hooks need a Python installation\n"
+                         "(pythonw/py on PATH). The log watcher keeps working anyway.",
+        "hooks_on_title": "Hooks enabled",
+        "hooks_on_text": "From the next Claude Code session on, Clawd reacts\n"
+                         "instantly to events — including \"Claude is waiting for "
+                         "your input\".\n\nSettings backup: {f}",
+        "err_dir": "Log directory not found: {p}",
+        "err_logs": "Logs unreadable: {e}",
+        "err_scan": "Scan error: {e}",
+    },
+}
+
+
+def tr(key: str, **kw):
+    table = STRINGS.get(_LANG) or STRINGS["de"]
+    s = table.get(key, STRINGS["de"].get(key, key))
+    if isinstance(s, tuple):
+        return s
+    return s.format(**kw) if kw else s
+
+
+def set_language(lang: str) -> None:
+    global _LANG
+    _LANG = lang if lang in STRINGS else "de"
+
+
+def language() -> str:
+    return _LANG
+
+
 def fmt_de(n: int) -> str:
-    """1234567 -> '1.234.567' (German thousands separator)."""
-    return f"{n:,}".replace(",", ".")
+    """Locale-aware thousands separator: 1.234.567 (de) / 1,234,567 (en)."""
+    s = f"{n:,}"
+    return s.replace(",", ".") if _LANG == "de" else s
 
 
 def fmt_pct_de(pct: float) -> str:
-    return f"{pct:.1f}".replace(".", ",") + " %"
+    s = f"{pct:.1f}"
+    return (s.replace(".", ",") if _LANG == "de" else s) + " %"
 
 
 # ======================================================================
@@ -1273,7 +1452,7 @@ class PetWidget(QWidget):
         self._anim_timer.start(self.ANIM_TICK_MS)
 
         self._apply_mood()
-        self.setToolTip("Clawd wartet auf die ersten Daten …")
+        self.setToolTip(tr("tooltip_wait"))
 
     # -------------------------------------------------- state / painting
 
@@ -1287,12 +1466,10 @@ class PetWidget(QWidget):
         if snap.error:
             self.setToolTip(snap.error)
         elif snap.source == "api":
-            self.setToolTip(f"Claude-Nutzung (5-h-Fenster): {fmt_pct_de(snap.pct)}")
+            self.setToolTip(tr("tooltip_api", p=fmt_pct_de(snap.pct)))
         else:
-            self.setToolTip(
-                f"Claude-Nutzung (Schätzung): {fmt_pct_de(snap.pct)}  "
-                f"({fmt_de(snap.total)} Tokens verbraucht)"
-            )
+            self.setToolTip(tr("tooltip_est", p=fmt_pct_de(snap.pct),
+                               n=fmt_de(snap.total)))
 
     def set_pct(self, pct: float):
         self.pct = pct
@@ -1562,9 +1739,9 @@ class PanelWidget(QWidget):
         avatar = QLabel()
         avatar.setPixmap(sprite_pixmap("chill", 24) or make_clawd_pixmap(24))
         header.addWidget(avatar)
-        title = QLabel(f"Plan-Nutzungslimits · {PLAN_NAME}")
-        title.setObjectName("h1")
-        header.addWidget(title, 1)
+        self._title = QLabel(tr("panel_title", plan=PLAN_NAME))
+        self._title.setObjectName("h1")
+        header.addWidget(self._title, 1)
         lay.addLayout(header)
         lay.addWidget(self._divider())
 
@@ -1642,6 +1819,9 @@ class PanelWidget(QWidget):
         self._rows[key] = row
         return row
 
+    def retranslate(self):
+        self._title.setText(tr("panel_title", plan=PLAN_NAME))
+
     def _show_only(self, keys):
         """Hide rows that the current snapshot does not provide, so switching
         between API and log mode never leaves a stale duplicate row behind."""
@@ -1681,11 +1861,11 @@ class PanelWidget(QWidget):
                 key=lambda kv: -kv[1])
             if models:
                 parts = " · ".join(f"{n} {fmt_de(t)}" for n, t in models)
-                self.detail_label.setText(f"Lokal gezählt (5-h-Fenster): {parts} Tokens")
+                self.detail_label.setText(tr("detail_local", parts=parts))
             else:
                 self.detail_label.setText("")
         else:
-            row = self._ensure_row("estimate", "5-Stunden-Limit")
+            row = self._ensure_row("estimate", tr("row_5h"))
             self._animate_row(row, snap.pct)
             row["pct"].setText(fmt_pct_de(snap.pct))
             keys = {"estimate"}
@@ -1700,14 +1880,14 @@ class PanelWidget(QWidget):
                 mrow = self._ensure_row(mkey, name)
                 share = (tok / budget * 100.0) if budget > 0 else 0.0
                 self._animate_row(mrow, share)
-                mrow["reset"].setText(f"{fmt_de(tok)} Tokens (In + Out)")
+                mrow["reset"].setText(tr("tokens_inout", n=fmt_de(tok)))
                 keys.add(mkey)
 
             # weekly limits, estimated from the same logs
             wtail = ("  ·  " + _fmt_reset(snap.week_reset)
-                     if snap.week_reset is not None else "  ·  ≈ letzte 7 Tage")
-            wk = self._ensure_row("week_all", "Wöchentlich · alle Modelle")
-            wk["reset"].setText(f"{fmt_de(snap.week_total)} Tokens{wtail}")
+                     if snap.week_reset is not None else "  ·  " + tr("rolling7"))
+            wk = self._ensure_row("week_all", tr("row_week_all"))
+            wk["reset"].setText(tr("tokens_n", n=fmt_de(snap.week_total)) + wtail)
             wbudget = weekly_budget_all()
             if wbudget:
                 self._animate_row(wk, snap.week_total / wbudget * 100.0)
@@ -1717,22 +1897,22 @@ class PanelWidget(QWidget):
             for name, mb in weekly_model_budgets().items():
                 tokens = snap.week_by_model.get(name, 0)
                 mkey = f"week:{name}"
-                mrow = self._ensure_row(mkey, f"Wöchentlich · {name}")
+                mrow = self._ensure_row(mkey, tr("row_week_model", name=name))
                 self._animate_row(mrow, tokens / mb * 100.0 if mb else 0.0)
-                mrow["reset"].setText(f"{fmt_de(tokens)} Tokens{wtail}")
+                mrow["reset"].setText(tr("tokens_n", n=fmt_de(tokens)) + wtail)
                 keys.add(mkey)
             self._show_only(keys)
 
-            hint = ("Limit kalibriert" if is_calibrated()
-                    else "Limits automatisch kalibriert" if auto_budget_active()
-                    else "Platzhalter-Limit – im Tray-Menü kalibrieren")
+            hint = (tr("hint_manual") if is_calibrated()
+                    else tr("hint_auto") if auto_budget_active()
+                    else tr("hint_placeholder"))
             self.detail_label.setText(
-                f"{fmt_de(snap.total)} Tokens verbraucht (Input + Output) · {hint}")
+                tr("detail_used", n=fmt_de(snap.total), hint=hint))
         self.detail_label.setVisible(bool(self.detail_label.text()))
         if snap.updated_at:
-            src = "live" if snap.source == "api" else "lokal"
+            src = tr("src_live") if snap.source == "api" else tr("src_local")
             self.updated_label.setText(
-                f"Zuletzt aktualisiert: {snap.updated_at.strftime('%H:%M:%S')} ({src})")
+                tr("updated", t=snap.updated_at.strftime("%H:%M:%S"), src=src))
         self._refresh_countdown()
         # rows are inserted lazily — force a full re-layout before resizing,
         # otherwise sizeHint() is stale and the card gets squashed
@@ -1927,6 +2107,7 @@ class ClawdApp:
     def __init__(self, app: QApplication, with_tray: bool = True):
         self.app = app
         self.settings = QSettings(ORG_NAME, APP_NAME)
+        set_language(str(self.settings.value("language", "de") or "de"))
         self.snapshot = UsageSnapshot()
 
         saved = self.settings.value("max_tokens")
@@ -2008,7 +2189,7 @@ class ClawdApp:
 
     def _setup_tray(self):
         self.tray = QSystemTrayIcon(make_app_icon(), self.app)
-        self.tray.setToolTip("Clawd – Claude Code Nutzung")
+        self.tray.setToolTip(tr("tray_title"))
         self._tray_menu = self.build_menu(None)
         self.tray.setContextMenu(self._tray_menu)
         self.tray.activated.connect(self._tray_activated)
@@ -2030,47 +2211,62 @@ class ClawdApp:
 
     def build_menu(self, parent) -> QMenu:
         menu = QMenu(parent)
-        act_refresh = QAction("Jetzt aktualisieren", menu)
+        act_refresh = QAction(tr("menu_refresh"), menu)
         act_refresh.triggered.connect(self.refresh)
         menu.addAction(act_refresh)
 
-        act_panel = QAction("Panel öffnen/schließen", menu)
+        act_panel = QAction(tr("menu_panel"), menu)
         act_panel.triggered.connect(self.toggle_panel)
         menu.addAction(act_panel)
 
         menu.addSeparator()
-        act_quiet = QAction("Sprechblasen einblenden" if self.quiet
-                            else "Sprechblasen ausblenden", menu)
+        act_quiet = QAction(tr("menu_quiet_on") if self.quiet
+                            else tr("menu_quiet_off"), menu)
         act_quiet.triggered.connect(self.toggle_quiet)
         menu.addAction(act_quiet)
 
         if hooks_registered(CLAUDE_SETTINGS_FILE):
-            act_hooks = QAction("Echtzeit-Hooks deaktivieren", menu)
+            act_hooks = QAction(tr("menu_hooks_off"), menu)
             act_hooks.triggered.connect(self.disable_hooks)
         else:
-            act_hooks = QAction("Echtzeit-Hooks aktivieren (Beta)", menu)
+            act_hooks = QAction(tr("menu_hooks_on"), menu)
             act_hooks.triggered.connect(self.enable_hooks)
         menu.addAction(act_hooks)
 
-        act_cal = QAction("Limit kalibrieren …", menu)
+        act_cal = QAction(tr("menu_cal"), menu)
         act_cal.triggered.connect(self.calibrate)
         menu.addAction(act_cal)
         if is_calibrated():
-            act_reset = QAction("Kalibrierung zurücksetzen", menu)
+            act_reset = QAction(tr("menu_cal_reset"), menu)
             act_reset.triggered.connect(self.reset_calibration)
             menu.addAction(act_reset)
+
+        act_lang = QAction(tr("menu_lang"), menu)
+        act_lang.triggered.connect(self.toggle_language)
+        menu.addAction(act_lang)
         menu.addSeparator()
 
         if self.tray is not None:   # without a tray there is no way to un-hide
-            act_show = QAction("Clawd anzeigen/verstecken", menu)
+            act_show = QAction(tr("menu_show"), menu)
             act_show.triggered.connect(self.toggle_pet_visible)
             menu.addAction(act_show)
 
         menu.addSeparator()
-        act_quit = QAction("Beenden", menu)
+        act_quit = QAction(tr("menu_quit"), menu)
         act_quit.triggered.connect(self.quit)
         menu.addAction(act_quit)
         return menu
+
+    def toggle_language(self):
+        set_language("en" if language() == "de" else "de")
+        self.settings.setValue("language", language())
+        self._rebuild_tray_menu()
+        self.panel.retranslate()
+        self.pet.set_snapshot(self.snapshot)
+        self.panel.update_snapshot(self.snapshot)
+        if self.tray:
+            self.tray.setToolTip(tr("tray_title"))
+        self.refresh()      # re-derive API bucket labels in the new language
 
     def toggle_pet_visible(self):
         if self.pet.isVisible():
@@ -2108,9 +2304,8 @@ class ClawdApp:
             if snap.error:
                 self.tray.setToolTip(f"Clawd – {snap.error}")
             else:
-                self.tray.setToolTip(
-                    f"Clawd – {fmt_pct_de(snap.pct)}  "
-                    f"({fmt_de(snap.total)} Tokens verbraucht)")
+                self.tray.setToolTip(tr("tray_tooltip", p=fmt_pct_de(snap.pct),
+                                        n=fmt_de(snap.total)))
             self.tray.setIcon(make_app_icon(mood_for_pct(snap.pct)))
 
     # -------------------------------------------------- panel control
@@ -2157,11 +2352,11 @@ class ClawdApp:
         if act == prev or self.quiet or not self.pet.isVisible():
             return
         if act and act[0] == "working" and act[1]:
-            text = TOOL_BUBBLES.get(act[1])
+            text = tool_bubble(act[1])
             if text and (not prev or prev[0] != "working" or prev[1] != act[1]):
                 self.bubble.show_text(text, self.pet)
         elif act and act[0] == "waiting" and prev and prev[0] == "working":
-            self.bubble.show_text("Fertig! Wartet auf dich.", self.pet)
+            self.bubble.show_text(tr("bubble_done"), self.pet)
 
     def _read_hook_datagrams(self):
         while self._udp.hasPendingDatagrams():
@@ -2179,17 +2374,17 @@ class ClawdApp:
         text = None
         if name == "PreToolUse":
             act = ("working", event.get("tool_name"))
-            text = TOOL_BUBBLES.get(event.get("tool_name"))
+            text = tool_bubble(event.get("tool_name"))
         elif name == "Notification":
             act = ("needs_input", None)
-            text = "Claude wartet auf deine Eingabe!"
+            text = tr("bubble_input")
         elif name in ("Stop", "TaskCompleted"):
             act = ("waiting", None)
         elif name == "PostToolUseFailure":
             act = ("error", None)
             QTimer.singleShot(5000, self._clear_error_state)
         elif name == "SessionStart":
-            text = "Neue Claude-Session gestartet"
+            text = tr("bubble_session")
         else:
             return
         self._hook_hold_until = time.monotonic() + 15.0
@@ -2216,16 +2411,12 @@ class ClawdApp:
         command = hook_command()
         if not command:
             QMessageBox.warning(
-                None, "Python benötigt",
-                "Für Echtzeit-Hooks wird eine Python-Installation benötigt\n"
-                "(pythonw/py im PATH). Der Log-Watcher läuft trotzdem weiter.")
+                None, tr("hooks_py_title"), tr("hooks_py_text"))
             return
         if register_hooks(CLAUDE_SETTINGS_FILE, command):
             QMessageBox.information(
-                None, "Hooks aktiviert",
-                "Clawd reagiert ab der nächsten Claude-Code-Session sofort auf\n"
-                "Ereignisse — inklusive „Claude wartet auf deine Eingabe“.\n\n"
-                f"Backup der Einstellungen: {CLAUDE_SETTINGS_FILE.name}.clawd-bak")
+                None, tr("hooks_on_title"),
+                tr("hooks_on_text", f=f"{CLAUDE_SETTINGS_FILE.name}.clawd-bak"))
         self._rebuild_tray_menu()
 
     def disable_hooks(self):
@@ -2244,23 +2435,16 @@ class ClawdApp:
         snap = self.snapshot
         if snap.source == "api":
             QMessageBox.information(
-                None, "Kalibrierung nicht nötig",
-                "Die App bezieht gerade die echten Prozentwerte direkt von "
-                "Anthropic. Eine Kalibrierung ändert daran nichts.")
+                None, tr("cal_api_title"), tr("cal_api_text"))
             return
         if snap.total <= 0:
             QMessageBox.warning(
-                None, "Keine Daten",
-                "In den letzten 5 Stunden wurden keine Tokens gezählt.\n"
-                "Nutze Claude Code kurz und versuche es erneut.")
+                None, tr("cal_nodata_title"), tr("cal_nodata_text"))
             return
 
-        current = fmt_de(snap.total)
         pct, ok = QInputDialog.getDouble(
-            None, "Limit kalibrieren",
-            "Öffne in Claude Code das Nutzungs-Popup (Befehl /usage).\n"
-            "Welchen Prozentwert zeigt dort das 5-Stunden-Limit?\n\n"
-            f"Clawd hat im selben Fenster {current} Tokens gezählt.",
+            None, tr("cal_prompt_title"),
+            tr("cal_prompt_text", n=fmt_de(snap.total)),
             value=65.0, min=0.5, max=100.0, decimals=1)
         if not ok:
             return
@@ -2270,9 +2454,7 @@ class ClawdApp:
         set_max_tokens_override(budget)
         self._rebuild_tray_menu()
         QMessageBox.information(
-            None, "Kalibriert",
-            f"Dein 5-Stunden-Kontingent liegt bei etwa {fmt_de(budget)} Tokens.\n"
-            "Clawds Anzeige entspricht ab jetzt Claudes eigener.")
+            None, tr("cal_done_title"), tr("cal_done_text", n=fmt_de(budget)))
         self.refresh()
 
     def reset_calibration(self):
@@ -2475,6 +2657,17 @@ def run_selftest() -> int:
     pet.set_activity(None)
     assert pet.mood == "chill"
     print("[selftest] activity mood combination OK")
+
+    # language toggle: strings and number formatting switch together
+    assert language() == "de" and fmt_de(1234567) == "1.234.567"
+    set_language("en")
+    assert fmt_de(1234567) == "1,234,567"
+    assert tr("row_week_all") == "Weekly · all models"
+    assert tr("reset_in_hm", h=3, m=7) == "Resets in 3 h 07 min"
+    assert tool_bubble("Bash") == "running commands …"
+    set_language("de")
+    assert tr("row_week_all") == "Wöchentlich · alle Modelle"
+    print("[selftest] language toggle OK")
 
     assert not make_clawd_icon().isNull(), "tray icon failed"
     assert fmt_de(1234567) == "1.234.567"

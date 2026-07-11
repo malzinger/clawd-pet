@@ -73,6 +73,9 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
   wartet auf deine Eingabe". Benötigt Python im PATH; von `settings.json`
   wird ein `.clawd-bak`-Backup angelegt, Deaktivieren geht im selben Menü.
 - **Streicheln:** Doppelklick auf Clawd lässt Herzchen aufsteigen.
+- **Zweisprachig:** Die komplette Oberfläche (Panel, Sprechblasen, Menüs,
+  Dialoge, Zahlenformate) schaltet zwischen Deutsch und Englisch um —
+  Tray-Menü → „Language/Sprache".
 - Frei per Drag verschiebbar, Position wird gemerkt. Tray-Icon mit manuellem
   Refresh, Verstecken und Beenden.
 

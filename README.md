@@ -70,10 +70,10 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
   waiting for your input". Needs Python on PATH; a `.clawd-bak` backup of
   `settings.json` is kept and the entry can be removed from the same menu.
 - **Pet him:** double-click Clawd and hearts float up.
+- **Bilingual UI:** the whole app (panel, bubbles, menus, dialogs, number
+  formats) switches between English and German — tray menu → "Sprache/Language".
 - Drag him anywhere; the position is remembered. Tray icon with manual
   refresh, hide and quit.
-
-> Note: the app UI is currently German.
 
 ## Platform notes
 

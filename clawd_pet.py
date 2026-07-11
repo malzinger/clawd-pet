@@ -43,6 +43,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import webbrowser
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -157,6 +158,7 @@ USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
 ORG_NAME = "ClawdPet"
 APP_NAME = "Clawd"
+APP_VERSION = "1.2.0"
 
 # --- Burn-rate forecast + threshold notifications ----------------------------
 BURN_LOOKBACK_S = 3600      # forecast fits over at most the last hour
@@ -167,6 +169,20 @@ NOTIFY_THRESHOLDS = (95.0, 80.0)   # toast on upward crossings, highest wins
 AUTOSTART_REG_PATH = (r"HKEY_CURRENT_USER\Software\Microsoft"
                       r"\Windows\CurrentVersion\Run")
 AUTOSTART_REG_NAME = "ClawdPet"
+
+# --- Update check (GitHub Releases, read-only, best effort) ------------------
+GITHUB_REPO = "malzinger/clawd-pet"
+RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
+GITHUB_LATEST_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+UPDATE_CHECK = True                # look for a newer release (once/launch + 6 h)
+UPDATE_RECHECK_MS = 6 * 3600 * 1000
+
+# --- Usage history (local sparkline in the panel) ----------------------------
+HISTORY_FILE = Path.home() / ".clawd" / "history.json"
+HISTORY_INTERVAL_S = 300           # store at most one point every 5 minutes
+HISTORY_KEEP_DAYS = 7              # prune points older than this
+HISTORY_WINDOW_H = 24             # span shown in the panel sparkline
+HISTORY_GAP_S = 1800              # break the line across gaps longer than this
 
 
 # ======================================================================
@@ -947,6 +963,176 @@ def set_autostart(enabled: bool) -> bool:
     return reg.status() == QSettings.NoError
 
 
+def parse_version(tag: str) -> tuple:
+    """'v1.2.0' / '1.2' -> (1, 2, 0); non-numeric chunks count as 0."""
+    if not tag:
+        return ()
+    core = tag.strip().lstrip("vV").split("-")[0].split("+")[0]
+    parts = []
+    for chunk in core.split("."):
+        try:
+            parts.append(int(chunk))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
+
+
+def version_is_newer(latest: str, current: str) -> bool:
+    """True if the release tag `latest` is a strictly newer version."""
+    lv, cv = parse_version(latest), parse_version(current)
+    if not lv:
+        return False
+    n = max(len(lv), len(cv))
+    lv += (0,) * (n - len(lv))
+    cv += (0,) * (n - len(cv))
+    return lv > cv
+
+
+class UpdateThread(QThread):
+    """Fetch the latest GitHub release tag off the GUI thread (best effort)."""
+    result = pyqtSignal(str, str)   # (tag_name, html_url); empty tag on failure
+
+    def run(self):
+        try:
+            req = urllib.request.Request(
+                GITHUB_LATEST_API,
+                headers={"User-Agent": f"ClawdPet/{APP_VERSION}",
+                         "Accept": "application/vnd.github+json"})
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+            tag = str(data.get("tag_name") or "")
+            url = str(data.get("html_url") or RELEASES_URL)
+            self.result.emit(tag, url)
+        except (urllib.error.URLError, OSError, ValueError):
+            self.result.emit("", "")
+
+
+class HistoryStore:
+    """Append-only local usage history for the panel sparkline (JSON file)."""
+
+    def __init__(self, path: Path = HISTORY_FILE):
+        self.path = path
+        self._points = self._load()       # list[(datetime utc, pct)]
+        # honour the throttle across restarts: the newest on-disk point counts
+        self._last_write: Optional[datetime] = (
+            self._points[-1][0] if self._points else None)
+
+    def _load(self) -> list:
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        out = []
+        for it in raw if isinstance(raw, list) else []:
+            if not isinstance(it, dict):
+                continue
+            ts = _parse_iso_ts(it.get("t"))
+            if ts is None:
+                continue
+            try:
+                out.append((ts, float(it.get("pct", 0.0))))
+            except (TypeError, ValueError):
+                pass
+        out.sort(key=lambda p: p[0])
+        return out
+
+    def add(self, now: datetime, pct: float) -> bool:
+        """Record a point, throttled to HISTORY_INTERVAL_S. True if stored."""
+        if (self._last_write is not None and
+                (now - self._last_write).total_seconds() < HISTORY_INTERVAL_S):
+            return False
+        self._points.append((now, pct))
+        self._last_write = now
+        cutoff = now - timedelta(days=HISTORY_KEEP_DAYS)
+        self._points = [p for p in self._points if p[0] >= cutoff]
+        self._save()
+        return True
+
+    def _save(self) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(
+                [{"t": t.isoformat(), "pct": round(p, 2)}
+                 for t, p in self._points]), encoding="utf-8")
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    def series(self, window_h: int = HISTORY_WINDOW_H,
+               now: Optional[datetime] = None) -> list:
+        now = now or datetime.now(timezone.utc)
+        cutoff = now - timedelta(hours=window_h)
+        return [p for p in self._points if p[0] >= cutoff]
+
+
+class HistoryChart(QWidget):
+    """Compact area sparkline of the 5-hour usage pct over the last day."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._series = []
+        self.setFixedHeight(54)
+
+    def set_series(self, series) -> None:
+        self._series = list(series)
+        self.setVisible(len(self._series) >= 2)
+        self.update()
+
+    def paintEvent(self, _event):
+        if len(self._series) < 2:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        w, h = self.width(), self.height()
+        pad = 2.0
+        t0 = self._series[0][0]
+        span = (self._series[-1][0] - t0).total_seconds() or 1.0
+
+        def px(t):
+            return pad + (t - t0).total_seconds() / span * (w - 2 * pad)
+
+        def py(pct):
+            v = max(0.0, min(100.0, pct))
+            return h - pad - v / 100.0 * (h - 2 * pad)
+
+        # 80 % warning guide
+        p.setPen(QPen(QColor("#6b5836"), 1, Qt.DashLine))
+        y80 = py(80.0)
+        p.drawLine(int(pad), int(y80), int(w - pad), int(y80))
+
+        # split into segments so long gaps (pet was off) are not bridged
+        segments, prev_t = [[]], None
+        for t, pct in self._series:
+            if prev_t is not None and (t - prev_t).total_seconds() > HISTORY_GAP_S:
+                segments.append([])
+            segments[-1].append((px(t), py(pct)))
+            prev_t = t
+
+        line_pen = QPen(QColor("#6879f8"), 2)
+        line_pen.setCapStyle(Qt.RoundCap)
+        line_pen.setJoinStyle(Qt.RoundJoin)
+        for seg in segments:
+            if len(seg) < 2:
+                if seg:
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(QColor("#6879f8"))
+                    x, y = seg[0]
+                    p.drawEllipse(QRectF(x - 1.6, y - 1.6, 3.2, 3.2))
+                continue
+            path = QPainterPath()
+            path.moveTo(seg[0][0], seg[0][1])
+            for x, y in seg[1:]:
+                path.lineTo(x, y)
+            fill = QPainterPath(path)
+            fill.lineTo(seg[-1][0], h - pad)
+            fill.lineTo(seg[0][0], h - pad)
+            fill.closeSubpath()
+            p.fillPath(fill, QColor(104, 121, 248, 40))
+            p.strokePath(path, line_pen)
+        p.end()
+
+
 STRINGS = {
     "de": {
         "panel_title": "Plan-Nutzungslimits · {plan}",
@@ -1025,6 +1211,11 @@ STRINGS = {
         "single_title": "Clawd läuft bereits",
         "single_text": "Eine andere Clawd-Instanz läuft schon –\n"
                        "schau ins Tray oder auf deinen Desktop.",
+        "history_title": "Verlauf (24 Std.)",
+        "menu_check_updates": "Auf Updates prüfen",
+        "menu_update": "⬇ Update {v} laden",
+        "update_available": "Update {v} verfügbar!",
+        "update_text": "Zum Herunterladen klicken.",
     },
     "en": {
         "panel_title": "Plan usage limits · {plan}",
@@ -1103,6 +1294,11 @@ STRINGS = {
         "single_title": "Clawd is already running",
         "single_text": "Another Clawd instance is already running –\n"
                        "check the tray or your desktop.",
+        "history_title": "History (24 h)",
+        "menu_check_updates": "Check for updates",
+        "menu_update": "⬇ Get update {v}",
+        "update_available": "Update {v} available!",
+        "update_text": "Click to download.",
     },
 }
 
@@ -1882,6 +2078,14 @@ class PanelWidget(QWidget):
         self.forecast_label.setObjectName("sub")
         self.forecast_label.setWordWrap(True)
         lay.addWidget(self.forecast_label)
+        self._history = []
+        self.history_title = QLabel(tr("history_title"))
+        self.history_title.setObjectName("note")
+        self.history_title.setVisible(False)
+        lay.addWidget(self.history_title)
+        self.history_chart = HistoryChart()
+        self.history_chart.setVisible(False)
+        lay.addWidget(self.history_chart)
         self.updated_label = QLabel("Zuletzt aktualisiert: –")
         self.updated_label.setObjectName("note")
         lay.addWidget(self.updated_label)
@@ -1948,6 +2152,10 @@ class PanelWidget(QWidget):
 
     def retranslate(self):
         self._title.setText(tr("panel_title", plan=PLAN_NAME))
+        self.history_title.setText(tr("history_title"))
+
+    def set_history(self, series):
+        self._history = list(series)
 
     def _show_only(self, keys):
         """Hide rows that the current snapshot does not provide, so switching
@@ -2039,6 +2247,8 @@ class PanelWidget(QWidget):
                 tr("detail_used", n=fmt_de(snap.total), hint=hint))
         self.detail_label.setVisible(bool(self.detail_label.text()))
         self._update_forecast(snap)
+        self.history_chart.set_series(self._history)
+        self.history_title.setVisible(len(self._history) >= 2)
         if snap.updated_at:
             src = tr("src_live") if snap.source == "api" else tr("src_local")
             self.updated_label.setText(
@@ -2207,9 +2417,12 @@ class SpeechBubble(QWidget):
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self.hide)
         self.setFont(QFont("Segoe UI", 9))
+        self._on_click = None
 
-    def show_text(self, text: str, pet: QWidget, duration_ms: int = 4200):
+    def show_text(self, text: str, pet: QWidget, duration_ms: int = 4200,
+                  on_click=None):
         self._text = text
+        self._on_click = on_click
         fm = self.fontMetrics()
         self.setFixedSize(max(46, fm.horizontalAdvance(text) + self.PAD_X * 2),
                           fm.height() + self.PAD_Y * 2 + self.TAIL_H)
@@ -2228,6 +2441,12 @@ class SpeechBubble(QWidget):
         x = max(avail.left() + 4, min(x, avail.right() - self.width() - 4))
         y = max(avail.top() + 4, geo.top() - self.height() - 2)
         self.move(x, y)
+
+    def mousePressEvent(self, _event):
+        cb = self._on_click
+        self.hide()
+        if cb:
+            cb()
 
     def paintEvent(self, _event):
         p = QPainter(self)
@@ -2294,6 +2513,13 @@ class ClawdApp:
         # the forecast and the threshold toasts would go dark for minutes.
         self._burn_samples = {}          # source -> list[(utc time, pct)]
         self._prev_pct = {}              # source -> last pct seen
+        self.history = HistoryStore()
+        self.check_updates = self.settings.value(
+            "check_updates", UPDATE_CHECK, type=bool)
+        self._update_url = ""
+        self._update_tag = ""
+        self._update_thread: Optional[UpdateThread] = None
+        self._last_toast_was_update = False   # gate messageClicked to the update toast
         self._newest_log: Optional[Path] = None
         self._last_activity = None
         self._hook_hold_until = 0.0
@@ -2308,6 +2534,10 @@ class ClawdApp:
         self._scan_timer = QTimer()
         self._scan_timer.setInterval(SCAN_INTERVAL_MS)
         self._scan_timer.timeout.connect(self.refresh)
+
+        self._update_timer = QTimer()
+        self._update_timer.setInterval(UPDATE_RECHECK_MS)
+        self._update_timer.timeout.connect(self._begin_update_check)
 
         self._hide_check = QTimer()
         self._hide_check.setSingleShot(True)
@@ -2328,16 +2558,23 @@ class ClawdApp:
         self._scan_timer.start()
         self._activity_timer.start()
         self.refresh()
+        if self.check_updates:
+            self._begin_update_check()
+            self._update_timer.start()
 
     def quit(self):
         self.save_position()
         self._scan_timer.stop()
         self._activity_timer.stop()
+        self._update_timer.stop()
         self._udp.close()
         thread = self._scan_thread
         if thread is not None and thread.isRunning():
             thread.requestInterruption()
             thread.wait(5000)   # destroying a running QThread aborts the process
+        upd = self._update_thread
+        if upd is not None and upd.isRunning():
+            upd.wait(7000)   # must exceed UpdateThread's 6 s network timeout
         if self.tray:
             self.tray.hide()
         self.app.quit()
@@ -2350,6 +2587,7 @@ class ClawdApp:
         self._tray_menu = self.build_menu(None)
         self.tray.setContextMenu(self._tray_menu)
         self.tray.activated.connect(self._tray_activated)
+        self.tray.messageClicked.connect(self._on_toast_clicked)
         self.tray.show()
 
     def _tray_activated(self, reason):
@@ -2368,6 +2606,14 @@ class ClawdApp:
 
     def build_menu(self, parent) -> QMenu:
         menu = QMenu(parent)
+        if self._update_url:
+            act_update = QAction(tr("menu_update", v=self._update_tag), menu)
+            fnt = act_update.font()
+            fnt.setBold(True)
+            act_update.setFont(fnt)
+            act_update.triggered.connect(self._open_update)
+            menu.addAction(act_update)
+            menu.addSeparator()
         act_refresh = QAction(tr("menu_refresh"), menu)
         act_refresh.triggered.connect(self.refresh)
         menu.addAction(act_refresh)
@@ -2413,6 +2659,12 @@ class ClawdApp:
             act_auto.setChecked(autostart_enabled())
             act_auto.triggered.connect(self.toggle_autostart)
             menu.addAction(act_auto)
+
+        act_upd = QAction(tr("menu_check_updates"), menu)
+        act_upd.setCheckable(True)
+        act_upd.setChecked(self.check_updates)
+        act_upd.triggered.connect(self.toggle_update_check)
+        menu.addAction(act_upd)
         menu.addSeparator()
 
         if self.tray is not None:   # without a tray there is no way to un-hide
@@ -2468,6 +2720,7 @@ class ClawdApp:
             samples[:] = [s for s in samples if s[0] >= cutoff]
             snap.burn_eta = burn_eta(samples)
             self._notify_transition(snap.source, snap.pct)
+            self.history.add(now, snap.pct)
         cal = auto_calibration()          # persist budgets learned from live syncs
         if cal["budget_5h"]:
             self.settings.setValue("auto_budget_5h", cal["budget_5h"])
@@ -2478,6 +2731,7 @@ class ClawdApp:
         if cal["models"]:
             self.settings.setValue("weekly_budget_models", json.dumps(cal["models"]))
         self.pet.set_snapshot(snap)
+        self.panel.set_history(self.history.series())
         self.panel.update_snapshot(snap)
         if self.tray:
             if snap.error:
@@ -2595,6 +2849,48 @@ class ClawdApp:
         set_autostart(not autostart_enabled())
         self._rebuild_tray_menu()
 
+    def toggle_update_check(self):
+        self.check_updates = not self.check_updates
+        self.settings.setValue("check_updates", self.check_updates)
+        if self.check_updates:
+            self._update_timer.start()
+            self._begin_update_check()
+        else:
+            self._update_timer.stop()
+        self._rebuild_tray_menu()
+
+    # -------------------------------------------------- update check
+
+    def _begin_update_check(self):
+        if self._update_thread is not None and self._update_thread.isRunning():
+            return
+        self._update_thread = UpdateThread()
+        self._update_thread.result.connect(self._on_update_result)
+        self._update_thread.start()
+
+    def _on_update_result(self, tag: str, url: str):
+        if not tag or not version_is_newer(tag, APP_VERSION):
+            return
+        self._update_tag = tag
+        self._update_url = url or RELEASES_URL
+        self._rebuild_tray_menu()
+        if self.pet.isVisible() and not self.quiet:
+            self.bubble.show_text(tr("update_available", v=tag), self.pet, 8000,
+                                  on_click=self._open_update)
+        if self.tray:
+            self._last_toast_was_update = True
+            self.tray.showMessage(tr("update_available", v=tag),
+                                  tr("update_text"),
+                                  QSystemTrayIcon.Information, 8000)
+
+    def _on_toast_clicked(self):
+        if self._last_toast_was_update:
+            self._open_update()
+
+    def _open_update(self):
+        if self._update_url:
+            webbrowser.open(self._update_url)
+
     def _notify_transition(self, source: str, pct: float):
         """Fire a tray toast when a scan crosses 80/95 % or the window resets.
 
@@ -2609,6 +2905,7 @@ class ClawdApp:
             return
         icon = (QSystemTrayIcon.Information if kind == "reset"
                 else QSystemTrayIcon.Warning)
+        self._last_toast_was_update = False   # this balloon is not the update one
         self.tray.showMessage(tr(f"notify_{kind}_title"),
                               tr(f"notify_{kind}_text"), icon, 6000)
 
@@ -2931,6 +3228,63 @@ def run_selftest() -> int:
         assert autostart_command(), "no autostart runner found"
         assert isinstance(autostart_enabled(), bool)
     print("[selftest] autostart OK")
+
+    # update check: version parsing and strict-newer comparison
+    assert parse_version("v1.2.0") == (1, 2, 0)
+    assert parse_version("1.10") == (1, 10)
+    assert version_is_newer("v1.2.0", "1.1.0")
+    assert version_is_newer("v1.2", "1.1.9")
+    assert version_is_newer("v1.10.0", "1.9.0")       # numeric, not lexical
+    assert not version_is_newer("v1.1.0", "1.1.0")
+    assert not version_is_newer("v1.0.0", "1.1.0")
+    assert not version_is_newer("", "1.1.0")
+    assert not version_is_newer("garbage", "1.1.0")
+    # the toast-click handler only opens the browser for the update toast
+    assert capp._last_toast_was_update is False
+    print("[selftest] update version compare OK")
+
+    # history store: throttled append, pruning, windowed series, reload
+    with tempfile.TemporaryDirectory() as td:
+        hp = Path(td) / "history.json"
+        hs = HistoryStore(hp)
+        hts0 = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+        assert hs.add(hts0, 10.0) is True
+        assert hs.add(hts0 + timedelta(seconds=30), 12.0) is False   # throttled
+        assert hs.add(hts0 + timedelta(seconds=400), 20.0) is True
+        hs._points.insert(0, (hts0 - timedelta(days=HISTORY_KEEP_DAYS + 1), 5.0))
+        assert hs.add(hts0 + timedelta(seconds=800), 25.0) is True
+        floor = hts0 + timedelta(seconds=800) - timedelta(days=HISTORY_KEEP_DAYS)
+        assert all(p[0] >= floor for p in hs._points), "old point not pruned"
+        hs2 = HistoryStore(hp)                       # reload from disk
+        assert hs2._points and len(hs2._points) == len(hs._points)
+        win = hs2.series(window_h=1, now=hts0 + timedelta(seconds=800))
+        assert win and all(
+            p[0] >= hts0 + timedelta(seconds=800) - timedelta(hours=1)
+            for p in win)
+        # throttle survives a restart: reload restores _last_write from disk
+        hs3 = HistoryStore(hp)
+        newest = max(p[0] for p in hs3._points)
+        assert hs3.add(newest + timedelta(seconds=60), 99.0) is False
+        assert hs3.add(newest + timedelta(seconds=400), 99.0) is True
+    print("[selftest] history store OK")
+
+    # history chart: renders standalone and shows up in the panel with data
+    hseries = [(hts0 + timedelta(minutes=i * 5), 10.0 + i) for i in range(6)]
+    chart = HistoryChart()
+    chart.resize(320, 54)
+    chart.set_series(hseries)
+    assert not chart.grab().isNull(), "history chart render failed"
+    chart.set_series(hseries[:1])
+    assert not chart.isVisible() or chart.isHidden() is False
+    panel.set_history(hseries)
+    panel.update_snapshot(snap)
+    app.processEvents()
+    assert len(panel.history_chart._series) == 6, "panel chart series not applied"
+    assert not panel.history_chart.isHidden(), "panel chart hidden with data"
+    panel.set_history([])
+    panel.update_snapshot(snap)
+    assert panel.history_chart.isHidden(), "empty history chart still shown"
+    print("[selftest] history chart OK")
 
     print("[selftest] OK")
     del app

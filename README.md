@@ -66,6 +66,12 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
   pace lasts until the reset.
 - **Notifications:** tray toasts when usage crosses 80 % / 95 % and when the
   5-hour window resets ("Fresh budget!"). Toggle via the tray menu.
+- **Usage history:** the panel draws a 24-hour sparkline of your usage from a
+  local history file (`~/.clawd/history.json`), so you can see when you burn
+  the most. Nothing leaves your machine.
+- **Update check:** on launch (and every 6 h) Clawd asks GitHub whether a
+  newer release exists and, if so, shows a bubble you can click to download.
+  Toggle it off in the tray menu.
 - **Start with Windows:** a tray-menu checkbox registers or removes
   autostart (Windows only).
 - **Reacts in real time:** a lightweight watcher follows the newest session

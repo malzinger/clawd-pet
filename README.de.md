@@ -70,6 +70,12 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
 - **Benachrichtigungen:** Tray-Toasts beim Überschreiten von 80 % / 95 % und
   beim Reset des 5-Stunden-Fensters („Budget wieder frisch!"). Im Tray-Menü
   abschaltbar.
+- **Nutzungsverlauf:** Das Panel zeichnet eine 24-Stunden-Sparkline aus einer
+  lokalen Verlaufsdatei (`~/.clawd/history.json`) — so siehst du, wann du am
+  meisten verbrauchst. Nichts verlässt deinen Rechner.
+- **Update-Prüfung:** Beim Start (und alle 6 Std.) fragt Clawd bei GitHub
+  nach, ob eine neuere Version existiert, und zeigt bei Bedarf eine Sprechblase
+  zum Herunterladen. Im Tray-Menü abschaltbar.
 - **Mit Windows starten:** Ein Häkchen im Tray-Menü registriert oder
   entfernt den Autostart (nur Windows).
 - **Reagiert in Echtzeit:** Ein leichtgewichtiger Watcher verfolgt das neueste

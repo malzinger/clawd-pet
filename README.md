@@ -58,6 +58,10 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
 - Click or hover Clawd for a Claude-style panel: 5-hour limit with progress
   bar, **per-model breakdown** (Fable, Opus, Sonnet, …) and a countdown until
   the window resets.
+- **See what Claude is working on:** the panel's top section names the current
+  project, your latest prompt, and the running tool with its concrete target
+  ("editing clawd_pet.py", "running: git push") — read straight from the local
+  session log, nothing sent anywhere.
 - **Self-calibrating:** Anthropic does not publish the actual token quotas, so
   right-click → "Limit kalibrieren …", type in the percentage Claude's own
   `/usage` popup shows — the app derives your real budget from it and stores it.

@@ -158,7 +158,7 @@ USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
 ORG_NAME = "ClawdPet"
 APP_NAME = "Clawd"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 
 # --- Burn-rate forecast + threshold notifications ----------------------------
 BURN_LOOKBACK_S = 3600      # forecast fits over at most the last hour
@@ -726,11 +726,89 @@ def tool_bubble(tool) -> Optional[str]:
     return TOOL_BUBBLES.get(_LANG, TOOL_BUBBLES["de"]).get(tool or "")
 
 
-def read_last_activity(path: Path, now: Optional[datetime] = None):
+# Detailed phrasing that names the concrete target ("{d}"), used by the panel's
+# "what Clawd is working on" line and by the enriched speech bubbles.
+TOOL_ACTIONS = {
+    "de": {
+        "Read": "liest {d}", "Edit": "bearbeitet {d}", "Write": "schreibt {d}",
+        "MultiEdit": "bearbeitet {d}", "NotebookEdit": "bearbeitet {d}",
+        "Bash": "führt aus: {d}", "PowerShell": "führt aus: {d}",
+        "Grep": "durchsucht: {d}", "Glob": "durchsucht: {d}",
+        "Task": "delegiert: {d}", "Agent": "delegiert: {d}",
+        "WebFetch": "surft: {d}", "WebSearch": "sucht: {d}",
+    },
+    "en": {
+        "Read": "reading {d}", "Edit": "editing {d}", "Write": "writing {d}",
+        "MultiEdit": "editing {d}", "NotebookEdit": "editing {d}",
+        "Bash": "running: {d}", "PowerShell": "running: {d}",
+        "Grep": "searching: {d}", "Glob": "searching: {d}",
+        "Task": "delegating: {d}", "Agent": "delegating: {d}",
+        "WebFetch": "browsing: {d}", "WebSearch": "searching: {d}",
+    },
+}
+
+
+def tool_action(tool, detail: str) -> str:
+    """Localized phrase naming the concrete target, e.g. 'bearbeitet foo.py'."""
+    if not detail:
+        return tool_bubble(tool) or ""
+    tmpl = TOOL_ACTIONS.get(_LANG, TOOL_ACTIONS["de"]).get(tool or "")
+    return tmpl.format(d=detail) if tmpl else (tool_bubble(tool) or detail)
+
+
+def tool_detail(name, inp) -> str:
+    """Extract the concrete target from a tool_use input block (best effort)."""
+    if not isinstance(inp, dict):
+        return ""
+    if name in ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit"):
+        fp = inp.get("file_path") or inp.get("notebook_path") or ""
+        return Path(fp).name if fp else ""
+    if name in ("Bash", "PowerShell"):
+        cmd = (inp.get("command") or "").strip().splitlines()
+        return cmd[0][:48] if cmd else ""
+    if name in ("Grep", "Glob"):
+        return (inp.get("pattern") or "")[:40]
+    if name in ("Task", "Agent"):
+        return (inp.get("description") or "")[:40]
+    if name == "WebFetch":
+        return (inp.get("url") or "")[:48]
+    if name == "WebSearch":
+        return (inp.get("query") or "")[:40]
+    return ""
+
+
+def _user_prompt_text(content) -> str:
+    """A genuine typed user prompt from a message's content, or '' for
+    tool results / slash-command and system wrappers (which start with '<')."""
+    if isinstance(content, str):
+        s = content.strip()
+    elif isinstance(content, list):
+        s = " ".join(
+            b.get("text", "").strip() for b in content
+            if isinstance(b, dict) and b.get("type") == "text")
+    else:
+        return ""
+    s = " ".join(s.split())
+    return "" if not s or s.startswith("<") else s
+
+
+@dataclass
+class SessionContext:
+    """What Claude is doing in the newest session, for the panel task view."""
+    kind: Optional[str] = None    # "working" | "waiting" | None (idle)
+    tool: Optional[str] = None    # current tool name
+    detail: str = ""              # concrete target (file, command, pattern)
+    task: str = ""                # latest genuine user prompt (truncated)
+    project: str = ""             # working directory basename
+
+
+def read_session_context(path: Path,
+                         now: Optional[datetime] = None) -> Optional[SessionContext]:
     """Inspect the tail of a session log.
 
-    Returns ("working", tool_name_or_None), ("waiting", None) — Claude has
-    finished its turn — or None when the log has gone quiet.
+    Returns a SessionContext (current activity + the task Claude is working on
+    + project), or None when the log has gone quiet. The .kind/.tool pair keeps
+    the exact meaning of the old activity tuple so the mood logic is unchanged.
     """
     if path is None:
         return None
@@ -749,6 +827,8 @@ def read_last_activity(path: Path, now: Optional[datetime] = None):
             tail = fh.read().decode("utf-8", errors="replace")
     except OSError:
         return None
+
+    ctx = SessionContext()
     for line in reversed(tail.splitlines()):
         line = line.strip()
         if not line.startswith("{"):
@@ -759,18 +839,42 @@ def read_last_activity(path: Path, now: Optional[datetime] = None):
             continue                      # first line may be cut by the seek
         if not isinstance(rec, dict):
             continue
+        if not ctx.project and isinstance(rec.get("cwd"), str) and rec["cwd"]:
+            ctx.project = Path(rec["cwd"]).name
         rtype = rec.get("type")
         msg = rec.get("message") if isinstance(rec.get("message"), dict) else None
-        if rtype == "assistant" and msg:
-            content = msg.get("content")
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "tool_use":
-                        return ("working", block.get("name"))
-            return ("waiting", None)      # spoke without tools -> turn is over
-        if rtype == "user":
-            return ("working", None)      # tool result arrived, Claude thinks
-    return None
+
+        if ctx.kind is None and msg is not None:
+            if rtype == "assistant":
+                content = msg.get("content")
+                if isinstance(content, list):
+                    for block in content:
+                        if (isinstance(block, dict)
+                                and block.get("type") == "tool_use"):
+                            ctx.kind = "working"
+                            ctx.tool = block.get("name")
+                            ctx.detail = tool_detail(ctx.tool, block.get("input"))
+                            break
+                if ctx.kind is None:
+                    ctx.kind = "waiting"  # spoke without tools -> turn is over
+            elif rtype == "user":
+                ctx.kind = "working"      # tool result / prompt just arrived
+
+        if not ctx.task and rtype == "user" and msg is not None:
+            txt = _user_prompt_text(msg.get("content"))
+            if txt:
+                ctx.task = txt[:160]
+
+        if ctx.kind is not None and ctx.task and ctx.project:
+            break
+
+    return ctx if ctx.kind is not None else None
+
+
+def read_last_activity(path: Path, now: Optional[datetime] = None):
+    """Backward-compatible activity tuple derived from the session context."""
+    ctx = read_session_context(path, now)
+    return (ctx.kind, ctx.tool) if ctx and ctx.kind else None
 
 
 # ======================================================================
@@ -1216,6 +1320,10 @@ STRINGS = {
         "menu_update": "⬇ Update {v} laden",
         "update_available": "Update {v} verfügbar!",
         "update_text": "Zum Herunterladen klicken.",
+        "task_title": "Woran Clawd arbeitet",
+        "task_project": "Projekt · {name}",
+        "task_waiting": "Wartet auf dich",
+        "task_quote": "„{s}“",
     },
     "en": {
         "panel_title": "Plan usage limits · {plan}",
@@ -1299,6 +1407,10 @@ STRINGS = {
         "menu_update": "⬇ Get update {v}",
         "update_available": "Update {v} available!",
         "update_text": "Click to download.",
+        "task_title": "What Clawd is working on",
+        "task_project": "Project · {name}",
+        "task_waiting": "Waiting for you",
+        "task_quote": "“{s}”",
     },
 }
 
@@ -2064,6 +2176,31 @@ class PanelWidget(QWidget):
         lay.addLayout(header)
         lay.addWidget(self._divider())
 
+        # ---- "what Clawd is working on" (current task) -----------------
+        self._task_ctx = None
+        self.task_title = QLabel(tr("task_title"))
+        self.task_title.setObjectName("note")
+        lay.addWidget(self.task_title)
+        self.task_project = QLabel("")
+        self.task_project.setObjectName("sub")
+        self.task_project.setWordWrap(True)
+        lay.addWidget(self.task_project)
+        self.task_prompt = QLabel("")
+        self.task_prompt.setObjectName("sub")
+        self.task_prompt.setWordWrap(True)
+        self.task_prompt.setStyleSheet("font-style: italic;")
+        lay.addWidget(self.task_prompt)
+        self.task_activity = QLabel("")
+        self.task_activity.setObjectName("rowlabel")
+        self.task_activity.setWordWrap(True)
+        lay.addWidget(self.task_activity)
+        self.task_div = self._divider()
+        lay.addWidget(self.task_div)
+        self._task_widgets = [self.task_title, self.task_project,
+                              self.task_prompt, self.task_activity, self.task_div]
+        for w in self._task_widgets:
+            w.setVisible(False)
+
         # ---- usage rows, created on demand from the live buckets --------
         self._rows = {}
 
@@ -2153,9 +2290,46 @@ class PanelWidget(QWidget):
     def retranslate(self):
         self._title.setText(tr("panel_title", plan=PLAN_NAME))
         self.history_title.setText(tr("history_title"))
+        self.task_title.setText(tr("task_title"))
+        self.set_task(self._task_ctx)
 
     def set_history(self, series):
         self._history = list(series)
+
+    def set_task(self, ctx):
+        """Update the 'what Clawd is working on' section from a SessionContext."""
+        self._task_ctx = ctx
+        if ctx is None or not (ctx.task or ctx.kind):
+            for w in self._task_widgets:
+                w.setVisible(False)
+            self._relayout()
+            return
+        self.task_project.setText(
+            tr("task_project", name=ctx.project) if ctx.project else "")
+        self.task_project.setVisible(bool(ctx.project))
+        self.task_prompt.setText(tr("task_quote", s=ctx.task) if ctx.task else "")
+        self.task_prompt.setVisible(bool(ctx.task))
+        if ctx.kind == "working":
+            line = tool_action(ctx.tool, ctx.detail)
+            self.task_activity.setText("⚙ " + line if line else "")
+        elif ctx.kind == "waiting":
+            self.task_activity.setText("✓ " + tr("task_waiting"))
+        else:
+            self.task_activity.setText("")
+        self.task_activity.setVisible(bool(self.task_activity.text()))
+        self.task_title.setVisible(True)
+        self.task_div.setVisible(True)
+        self._relayout()
+
+    def _relayout(self):
+        # rows and the task section are shown/hidden dynamically — force a full
+        # re-layout before resizing, otherwise sizeHint() is stale and the card
+        # gets squashed
+        self._lay.invalidate()
+        self._lay.activate()
+        self.layout().invalidate()
+        self.layout().activate()
+        self.adjustSize()
 
     def _show_only(self, keys):
         """Hide rows that the current snapshot does not provide, so switching
@@ -2254,13 +2428,7 @@ class PanelWidget(QWidget):
             self.updated_label.setText(
                 tr("updated", t=snap.updated_at.strftime("%H:%M:%S"), src=src))
         self._refresh_countdown()
-        # rows are inserted lazily — force a full re-layout before resizing,
-        # otherwise sizeHint() is stale and the card gets squashed
-        self._lay.invalidate()
-        self._lay.activate()
-        self.layout().invalidate()
-        self.layout().activate()
-        self.adjustSize()
+        self._relayout()
 
     def _update_forecast(self, snap: UsageSnapshot):
         """Burn-rate line: projected time of hitting the 5-hour limit."""
@@ -2522,6 +2690,7 @@ class ClawdApp:
         self._last_toast_was_update = False   # gate messageClicked to the update toast
         self._newest_log: Optional[Path] = None
         self._last_activity = None
+        self._session_ctx = None
         self._hook_hold_until = 0.0
         self._activity_timer = QTimer()
         self._activity_timer.setInterval(ACTIVITY_POLL_MS)
@@ -2776,16 +2945,20 @@ class ClawdApp:
     # -------------------------------------------------- real-time activity
 
     def _check_activity(self):
+        ctx = read_session_context(self._newest_log) if self._newest_log else None
+        self._session_ctx = ctx
+        self.panel.set_task(ctx)         # keep the task view live, even under hooks
         if time.monotonic() < self._hook_hold_until:
-            return                       # live hook events take precedence
-        act = read_last_activity(self._newest_log) if self._newest_log else None
+            return                       # live hook events drive the mood
+        act = (ctx.kind, ctx.tool) if ctx and ctx.kind else None
         prev = self._last_activity
         self._last_activity = act
         self.pet.set_activity(act)
         if act == prev or self.quiet or not self.pet.isVisible():
             return
         if act and act[0] == "working" and act[1]:
-            text = tool_bubble(act[1])
+            text = (tool_action(ctx.tool, ctx.detail) if ctx else None) \
+                or tool_bubble(act[1])
             if text and (not prev or prev[0] != "working" or prev[1] != act[1]):
                 self.bubble.show_text(text, self.pet)
         elif act and act[0] == "waiting" and prev and prev[0] == "working":
@@ -3285,6 +3458,56 @@ def run_selftest() -> int:
     panel.update_snapshot(snap)
     assert panel.history_chart.isHidden(), "empty history chart still shown"
     print("[selftest] history chart OK")
+
+    # session context: task + tool detail extracted from the tail
+    assert tool_detail("Edit", {"file_path": "C:/x/clawd_pet.py"}) == "clawd_pet.py"
+    assert tool_detail("Bash", {"command": "git push\nmore"}).startswith("git push")
+    assert tool_detail("Grep", {"pattern": "def foo"}) == "def foo"
+    assert tool_action("Edit", "foo.py") and "foo.py" in tool_action("Edit", "foo.py")
+    assert _user_prompt_text("<command>/model</command>") == ""      # wrapper skipped
+    assert _user_prompt_text("please refactor") == "please refactor"
+    with tempfile.TemporaryDirectory() as td:
+        slog = Path(td) / "s.jsonl"
+        slog.write_text(
+            json.dumps({"type": "user", "cwd": "C:/Users/x/Desktop/demo proj",
+                        "message": {"content": "please refactor the parser"}}) + "\n"
+            + json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Edit",
+                 "input": {"file_path": "C:/a/foo.py"}}]}}) + "\n",
+            encoding="utf-8")
+        sctx = read_session_context(slog)
+        assert sctx and sctx.kind == "working" and sctx.tool == "Edit"
+        assert sctx.detail == "foo.py"
+        assert sctx.task == "please refactor the parser"
+        assert sctx.project == "demo proj"
+        assert read_last_activity(slog) == ("working", "Edit")   # wrapper parity
+    # a very long project name must wrap, not clip (fixed-width panel)
+    long_ctx = SessionContext(
+        kind="working", tool="Bash", detail="git push origin main",
+        task=sctx.task,
+        project="a-really-long-monorepo-folder-name-that-would-overflow-the-panel")
+    panel.set_task(long_ctx)
+    panel.move(-4000, -4000)
+    panel.show()
+    app.processEvents()
+    for w in (panel.task_project, panel.task_prompt, panel.task_activity):
+        if not w.text() or w.isHidden():
+            continue
+        need = w.fontMetrics().boundingRect(
+            QRect(0, 0, w.width(), 10_000),
+            Qt.TextWordWrap if w.wordWrap() else 0, w.text())
+        assert need.width() <= w.width() + 1, f"task label clipped: {w.text()[:30]}"
+    assert not panel.grab().isNull()
+    panel.hide()
+    panel.set_task(sctx)
+    panel.update_snapshot(snap)
+    app.processEvents()
+    assert not panel.task_prompt.isHidden(), "task prompt hidden with data"
+    assert "refactor" in panel.task_prompt.text()
+    panel.set_task(None)
+    panel.update_snapshot(snap)
+    assert panel.task_title.isHidden(), "task section shown while idle"
+    print("[selftest] session context / task view OK")
 
     print("[selftest] OK")
     del app

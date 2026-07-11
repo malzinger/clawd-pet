@@ -97,11 +97,11 @@ from PyQt5.QtWidgets import (
 #  CONFIG — edit these to match your plan
 # ======================================================================
 
-# Rolling-window quota. Anthropic does not publish the real token budget of any
-# plan, so this is only a starting guess. Use the tray menu → "Limit
-# kalibrieren …" once and the app derives your real budget from the percentage
-# Claude itself displays; the result is stored in QSettings and wins over this.
-MAX_TOKENS = 88_000                # placeholder default (Max 5x plan)
+# Session-window budget in COST-WEIGHTED token units (see WEIGHT_* below).
+# Anthropic publishes no real numbers, so this is a rough Max-5x starting
+# guess; calibration (manual via tray menu, or automatic whenever a live API
+# sync succeeds) replaces it and is persisted in QSettings.
+MAX_TOKENS = 8_000_000             # placeholder default (Max 5x, weighted units)
 PLAN_NAME = "Max 5x"               # shown in the panel header
 WINDOW_HOURS = 5                   # length of Anthropic's fixed session window
 REPLAY_HOURS = 48                  # look-back to reconstruct the window chain
@@ -109,11 +109,15 @@ WEEK_REPLAY_HOURS = 192            # look-back covering the weekly limit window
 SCAN_INTERVAL_MS = 20_000          # how often the logs are rescanned
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
-# Cache reads are ~100x larger than input/output on agent workloads and barely
-# count against the real quota — excluded by default (else the meter pegs at
-# thousands of percent).
-COUNT_CACHE_READ = False           # include cache_read_input_tokens in the total
-COUNT_CACHE_CREATION = False       # include cache_creation_input_tokens in the total
+# Anthropic meters the plan limits by cost, not by raw token count. These
+# weights mirror the public API price ratios (output = 5x input, cache write
+# = 1.25x, cache read = 0.1x), so the local percentage scales like Claude's
+# own display across changing usage mixes. Displayed token numbers stay raw
+# input+output; only percentages and calibration use the weighted sum.
+WEIGHT_INPUT = 1.0
+WEIGHT_OUTPUT = 5.0
+WEIGHT_CACHE_CREATION = 1.25
+WEIGHT_CACHE_READ = 0.1
 
 PET_HEIGHT = 132                   # on-screen pixel height of Clawd
 PANEL_WIDTH = 392                  # width of the slide-out panel
@@ -179,6 +183,10 @@ class UsageSnapshot:
     week_by_model: dict = field(default_factory=dict)
     week_start: Optional[datetime] = None
     week_reset: Optional[datetime] = None
+    weighted: float = 0.0                         # cost-weighted window usage
+    week_weighted: float = 0.0
+    by_model_weighted: dict = field(default_factory=dict)
+    week_by_model_weighted: dict = field(default_factory=dict)
 
 
 _MAX_TOKENS_OVERRIDE: Optional[int] = None      # set once manually calibrated
@@ -443,9 +451,14 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
 
     for inp, out, cr, cc, ts, model, _mid in all_entries:
         name = pretty_model(model)
+        w = (inp * WEIGHT_INPUT + out * WEIGHT_OUTPUT
+             + cc * WEIGHT_CACHE_CREATION + cr * WEIGHT_CACHE_READ)
         if ts >= week_start:
             snap.week_total += inp + out
+            snap.week_weighted += w
             snap.week_by_model[name] = snap.week_by_model.get(name, 0) + inp + out
+            snap.week_by_model_weighted[name] = (
+                snap.week_by_model_weighted.get(name, 0.0) + w)
         if window_start is None or ts < window_start:
             continue                    # previous, already reset window
         snap.entries += 1
@@ -453,15 +466,13 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
         snap.output_tokens += out
         snap.cache_read += cr
         snap.cache_creation += cc
+        snap.weighted += w
         snap.by_model[name] = snap.by_model.get(name, 0) + inp + out
+        snap.by_model_weighted[name] = snap.by_model_weighted.get(name, 0.0) + w
 
     snap.total = snap.input_tokens + snap.output_tokens
-    if COUNT_CACHE_READ:
-        snap.total += snap.cache_read
-    if COUNT_CACHE_CREATION:
-        snap.total += snap.cache_creation
     budget = effective_max_tokens()
-    snap.pct = (snap.total / budget * 100.0) if budget > 0 else 0.0
+    snap.pct = (snap.weighted / budget * 100.0) if budget > 0 else 0.0
     return snap
 
 
@@ -613,15 +624,15 @@ def collect_usage(should_stop=None) -> UsageSnapshot:
                     anchor = b.resets_at
                 if b.pct < 3.0:
                     continue          # too close to zero to divide reliably
-                if b.key == "five_hour" and snap.total > 0:
-                    budget_5h = round(snap.total / (b.pct / 100.0))
-                elif b.key == "seven_day" and snap.week_total > 0:
-                    weekly_budget = round(snap.week_total / (b.pct / 100.0))
+                if b.key == "five_hour" and snap.weighted > 0:
+                    budget_5h = round(snap.weighted / (b.pct / 100.0))
+                elif b.key == "seven_day" and snap.week_weighted > 0:
+                    weekly_budget = round(snap.week_weighted / (b.pct / 100.0))
                 elif b.key.startswith("weekly_"):
                     name = b.label.split("·")[-1].strip()
-                    tokens = snap.week_by_model.get(name, 0)
-                    if tokens > 0:
-                        model_budgets[name] = round(tokens / (b.pct / 100.0))
+                    wtok = snap.week_by_model_weighted.get(name, 0.0)
+                    if wtok > 0:
+                        model_budgets[name] = round(wtok / (b.pct / 100.0))
             set_auto_calibration(budget_5h, anchor, weekly_budget,
                                  model_budgets or None)
             return snap
@@ -1878,7 +1889,8 @@ class PanelWidget(QWidget):
             for name, tok in models:
                 mkey = f"model:{name}"
                 mrow = self._ensure_row(mkey, name)
-                share = (tok / budget * 100.0) if budget > 0 else 0.0
+                wtok = snap.by_model_weighted.get(name, 0.0)
+                share = (wtok / budget * 100.0) if budget > 0 else 0.0
                 self._animate_row(mrow, share)
                 mrow["reset"].setText(tr("tokens_inout", n=fmt_de(tok)))
                 keys.add(mkey)
@@ -1890,15 +1902,16 @@ class PanelWidget(QWidget):
             wk["reset"].setText(tr("tokens_n", n=fmt_de(snap.week_total)) + wtail)
             wbudget = weekly_budget_all()
             if wbudget:
-                self._animate_row(wk, snap.week_total / wbudget * 100.0)
+                self._animate_row(wk, snap.week_weighted / wbudget * 100.0)
             else:
                 wk["pct"].setText("—")
             keys.add("week_all")
             for name, mb in weekly_model_budgets().items():
                 tokens = snap.week_by_model.get(name, 0)
+                wtok = snap.week_by_model_weighted.get(name, 0.0)
                 mkey = f"week:{name}"
                 mrow = self._ensure_row(mkey, tr("row_week_model", name=name))
-                self._animate_row(mrow, tokens / mb * 100.0 if mb else 0.0)
+                self._animate_row(mrow, wtok / mb * 100.0 if mb else 0.0)
                 mrow["reset"].setText(tr("tokens_n", n=fmt_de(tokens)) + wtail)
                 keys.add(mkey)
             self._show_only(keys)
@@ -2449,7 +2462,7 @@ class ClawdApp:
         if not ok:
             return
 
-        budget = int(round(snap.total / (pct / 100.0)))
+        budget = int(round(snap.weighted / (pct / 100.0)))
         self.settings.setValue("max_tokens", budget)
         set_max_tokens_override(budget)
         self._rebuild_tray_menu()
@@ -2579,7 +2592,7 @@ def run_selftest() -> int:
     set_max_tokens_override(int(round(178_000 / 0.65)))
     assert is_calibrated() and effective_max_tokens() == 273_846
     probe = scan_usage()
-    expected = probe.total / 273_846 * 100.0
+    expected = probe.weighted / 273_846 * 100.0
     assert abs(probe.pct - expected) < 0.01, "calibrated budget not used by scan"
     print(f"[selftest] calibration: 178.000 Tokens @ 65 % -> "
           f"{effective_max_tokens()} Tokens Budget; live pct now {probe.pct:.1f}%")

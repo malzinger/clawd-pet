@@ -112,7 +112,7 @@ PLAN_NAME = "Max 5x"               # shown in the panel header
 WINDOW_HOURS = 5                   # length of Anthropic's fixed session window
 REPLAY_HOURS = 48                  # look-back to reconstruct the window chain
 WEEK_REPLAY_HOURS = 192            # look-back covering the weekly limit window
-SCAN_INTERVAL_MS = 20_000          # how often the logs are rescanned
+SCAN_INTERVAL_MS = 2_000           # how often the logs are rescanned (feels live)
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 # Anthropic meters the plan limits by cost, not by raw token count. These
@@ -171,19 +171,24 @@ CLAUDE_SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
 HOOK_EVENTS = ["PreToolUse", "Notification", "Stop", "SessionStart"]
 
 # --- Optional live sync with the Anthropic usage endpoint -------------------
-# Read-only, best effort: if ~/.claude/.credentials.json holds a *currently
-# valid* OAuth token, the exact utilization percentages Claude itself shows are
-# fetched. The app never writes to the credential store and never refreshes a
-# token (the refresh endpoint is bot-protected and returns 403). On Windows the
-# desktop app keeps its live token in the Credential Manager, so the file is
-# often stale — then the local log estimate below is used instead.
+# READ-ONLY, best effort: if ~/.claude/.credentials.json holds a *currently
+# valid* OAuth token that Claude Code stored, the exact utilization percentages
+# Claude's own /usage popup shows are fetched. Clawd never refreshes the token
+# and never writes the credential store — a passive monitor must not touch the
+# rotating login token Claude Code owns, or a failed write-back could lock the
+# user out of Claude Code. When the token is expired the local log estimate is
+# used; the last live reading is remembered as a calibration so it stays close.
 USE_API_USAGE = True
 CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+API_OK_INTERVAL_S = 30.0           # hit the usage endpoint at most this often when healthy
+API_RETRY_S = 5.0                  # base back-off after a failed usage fetch
+API_MAX_BACKOFF_S = 120.0          # cap the exponential back-off on repeated failures
+API_STALE_S = 180.0                # keep showing the last live % up to this long, then estimate
 
 ORG_NAME = "ClawdPet"
 APP_NAME = "Clawd"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 
 # --- Burn-rate forecast + threshold notifications ----------------------------
 BURN_LOOKBACK_S = 3600      # forecast fits over at most the last hour
@@ -578,7 +583,14 @@ def bucket_label(key: str) -> str:
 
 
 def _get_access_token() -> Optional[str]:
-    """The stored OAuth token, but only while it is still valid. Read-only."""
+    """The OAuth token Claude Code stored, but only while it is still valid.
+
+    READ-ONLY on purpose: Clawd never refreshes the token and never writes the
+    credential store. Anthropic rotates the refresh token on every use, so a
+    passive monitor that refreshed it could consume a rotation it fails to
+    persist (a contended file write, or a network timeout after the server
+    already rotated) and lock the user out of Claude Code itself. When the token
+    is expired we return None and fall back to the local, calibrated estimate."""
     if os.environ.get("CLAWD_NO_API"):
         return None
     try:
@@ -664,10 +676,34 @@ def fetch_api_usage() -> Optional[list]:
     return buckets or None
 
 
+_api_cache = {"buckets": None, "ts": 0.0, "next": 0.0, "fails": 0}   # throttle + back off
+
+
 def collect_usage(should_stop=None) -> UsageSnapshot:
-    """API first (exact numbers), local log estimate as fallback."""
+    """API first (exact numbers), local log estimate as fallback. The usage
+    endpoint is polled at most every API_OK_INTERVAL_S; between polls the last
+    buckets are reused so the log scan can run every couple of seconds without
+    hammering Anthropic. Repeated failures back off exponentially, and a single
+    blip keeps the last live reading (up to API_STALE_S) instead of flipping the
+    whole panel to the estimate."""
+    fetched_ok = False
     if USE_API_USAGE:
-        buckets = fetch_api_usage()
+        now_s = time.time()
+        if now_s >= _api_cache["next"]:
+            fresh = fetch_api_usage()
+            if fresh:
+                _api_cache["buckets"] = fresh
+                _api_cache["ts"] = now_s
+                _api_cache["fails"] = 0
+                _api_cache["next"] = now_s + API_OK_INTERVAL_S
+                fetched_ok = True
+            else:
+                _api_cache["fails"] += 1
+                backoff = min(API_MAX_BACKOFF_S, API_RETRY_S * 2 ** (_api_cache["fails"] - 1))
+                _api_cache["next"] = now_s + backoff
+                if _api_cache["buckets"] is not None and now_s - _api_cache["ts"] > API_STALE_S:
+                    _api_cache["buckets"] = None       # last live reading too old — show the estimate
+        buckets = _api_cache["buckets"]
         if buckets:
             # keep the local per-model token counts as extra detail
             snap = scan_usage(should_stop=should_stop)
@@ -679,27 +715,28 @@ def collect_usage(should_stop=None) -> UsageSnapshot:
             five = next((b for b in buckets if b.key == "five_hour"), buckets[0])
             snap.pct = five.pct
 
-            # auto-calibrate: exact API percentages + locally counted tokens
-            # reveal the real budgets, so the log-estimate mode stays accurate
-            # once the OAuth token expires again.
-            budget_5h = weekly_budget = anchor = None
-            model_budgets = {}
-            for b in buckets:
-                if b.key == "seven_day" and b.resets_at is not None:
-                    anchor = b.resets_at
-                if b.pct < 3.0:
-                    continue          # too close to zero to divide reliably
-                if b.key == "five_hour" and snap.weighted > 0:
-                    budget_5h = round(snap.weighted / (b.pct / 100.0))
-                elif b.key == "seven_day" and snap.week_weighted > 0:
-                    weekly_budget = round(snap.week_weighted / (b.pct / 100.0))
-                elif b.key.startswith("weekly_"):
-                    name = b.label.split("·")[-1].strip()
-                    wtok = snap.week_by_model_weighted.get(name, 0.0)
-                    if wtok > 0:
-                        model_budgets[name] = round(wtok / (b.pct / 100.0))
-            set_auto_calibration(budget_5h, anchor, weekly_budget,
-                                 model_budgets or None)
+            # auto-calibrate only from a *freshly fetched* reading: pairing a
+            # cached (stale) percentage with the still-growing local token count
+            # would slowly skew the learned budget.
+            if fetched_ok:
+                budget_5h = weekly_budget = anchor = None
+                model_budgets = {}
+                for b in buckets:
+                    if b.key == "seven_day" and b.resets_at is not None:
+                        anchor = b.resets_at
+                    if b.pct < 3.0:
+                        continue          # too close to zero to divide reliably
+                    if b.key == "five_hour" and snap.weighted > 0:
+                        budget_5h = round(snap.weighted / (b.pct / 100.0))
+                    elif b.key == "seven_day" and snap.week_weighted > 0:
+                        weekly_budget = round(snap.week_weighted / (b.pct / 100.0))
+                    elif b.key.startswith("weekly_"):
+                        name = b.label.split("·")[-1].strip()
+                        wtok = snap.week_by_model_weighted.get(name, 0.0)
+                        if wtok > 0:
+                            model_budgets[name] = round(wtok / (b.pct / 100.0))
+                set_auto_calibration(budget_5h, anchor, weekly_budget,
+                                     model_budgets or None)
             return snap
     return scan_usage(should_stop=should_stop)
 

@@ -50,7 +50,7 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
 
 ## Was es macht
 
-- Scannt alle 20 Sekunden deine lokalen Claude-Code-Logs
+- Scannt alle 2 Sekunden deine lokalen Claude-Code-Logs
   (`~/.claude/projects/**/*.jsonl`) auf einem Hintergrund-Thread,
   rekonstruiert aus den Zeitstempeln Anthropics **festes 5-Stunden-Fenster**
   (startet mit deiner ersten Nachricht und setzt sich nach 5 h komplett
@@ -68,10 +68,16 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
   zeigt eine Benachrichtigung, wenn Claude auf dich wartet. Wenn er nichts zu
   tun hat, spielt er ab und zu eine zufällige Animation (jonglieren, fegen,
   dirigieren …), und wenn du ihn zu oft streichelst, wird er genervt.
-- **Selbst-kalibrierend:** Anthropic veröffentlicht die echten
-  Token-Kontingente nicht. Rechtsklick → „Limit kalibrieren …", den
-  Prozentwert aus Claudes eigenem `/usage`-Popup eintippen — die App leitet
-  daraus dein echtes Budget ab und speichert es.
+- **Live-Sync (exakte Zahlen), read-only:** Clawd liest das OAuth-Token, das
+  Claude Code ohnehin gespeichert hat, und zeigt exakt die Auslastung aus
+  Claudes eigenem `/usage`-Popup — alle paar Sekunden aktualisiert. Clawd
+  erneuert oder schreibt das Token nie (ein passiver Monitor darf Claude Codes
+  rotierenden Login nicht anfassen): Solange das Token gültig ist, siehst du
+  exakte Zahlen; ist es abgelaufen, nutzt Clawd die Schätzung — kalibriert aus
+  der letzten Live-Messung, sodass sie nah dran bleibt.
+- **Selbst-kalibrierend (Fallback):** Ist der Live-Sync nicht verfügbar,
+  Rechtsklick → „Limit kalibrieren …" und den Prozentwert aus Claudes
+  eigenem `/usage`-Popup eintippen — die App leitet daraus dein echtes Budget ab.
 - **Burn-Rate-Prognose:** Das Panel rechnet hoch, wann du bei aktuellem
   Tempo das Limit erreichst („Bei diesem Tempo: Limit ca. 16:40 Uhr") —
   oder bestätigt, dass das Tempo bis zum Reset reicht.

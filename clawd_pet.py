@@ -100,11 +100,14 @@ from PyQt5.QtWidgets import (
 #  CONFIG — edit these to match your plan
 # ======================================================================
 
-# Session-window budget in COST-WEIGHTED token units (see WEIGHT_* below).
-# Anthropic publishes no real numbers, so this is a rough Max-5x starting
-# guess; calibration (manual via tray menu, or automatic whenever a live API
-# sync succeeds) replaces it and is persisted in QSettings.
-MAX_TOKENS = 8_000_000             # placeholder default (Max 5x, weighted units)
+# Session-window budget in COST-WEIGHTED token units (see WEIGHT_* and
+# MODEL_COST below). Anthropic publishes no real numbers, so this is a rough
+# Max-5x starting guess; calibration (manual via tray menu, or automatic
+# whenever a live API sync succeeds) replaces it and is persisted in QSettings.
+# It is sized for the cost-weighted scale (Opus tokens weigh ~5x), so an
+# uncalibrated Opus-heavy window reads a plausible mid-range %, not a false
+# >100% "limit".
+MAX_TOKENS = 40_000_000            # placeholder default (Max 5x, cost-weighted units)
 PLAN_NAME = "Max 5x"               # shown in the panel header
 WINDOW_HOURS = 5                   # length of Anthropic's fixed session window
 REPLAY_HOURS = 48                  # look-back to reconstruct the window chain
@@ -121,6 +124,17 @@ WEIGHT_INPUT = 1.0
 WEIGHT_OUTPUT = 5.0
 WEIGHT_CACHE_CREATION = 1.25
 WEIGHT_CACHE_READ = 0.1
+
+# Models also cost very differently against the plan. These multipliers mirror
+# the public per-token price tiers (relative to Sonnet), so the estimate tracks
+# Claude's percentage across changing model mixes — one calibration then holds
+# whether you code with Opus or Fable, instead of drifting every window.
+MODEL_COST = {"Opus": 5.0, "Sonnet": 1.0, "Haiku": 0.3, "Fable": 0.3}
+WEIGHT_VERSION = 2      # bump to drop stale calibrations after changing the weights
+
+
+def model_cost(name: str) -> float:
+    return MODEL_COST.get(name, 1.0)
 
 PET_HEIGHT = 132                   # on-screen pixel height of Clawd
 PANEL_WIDTH = 392                  # width of the slide-out panel
@@ -169,7 +183,7 @@ USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
 ORG_NAME = "ClawdPet"
 APP_NAME = "Clawd"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 
 # --- Burn-rate forecast + threshold notifications ----------------------------
 BURN_LOOKBACK_S = 3600      # forecast fits over at most the last hour
@@ -259,6 +273,14 @@ def set_auto_calibration(budget_5h=None, weekly_anchor=None,
     if weekly_model_budgets:
         _WEEKLY_BUDGET_MODELS = {str(k): int(v)
                                  for k, v in weekly_model_budgets.items()}
+
+
+def reset_auto_calibration() -> None:
+    global _AUTO_BUDGET_5H, _WEEKLY_ANCHOR, _WEEKLY_BUDGET_ALL, _WEEKLY_BUDGET_MODELS
+    _AUTO_BUDGET_5H = None
+    _WEEKLY_ANCHOR = None
+    _WEEKLY_BUDGET_ALL = None
+    _WEEKLY_BUDGET_MODELS = {}
 
 
 def auto_calibration() -> dict:
@@ -493,8 +515,9 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
 
     for inp, out, cr, cc, ts, model, _mid in all_entries:
         name = pretty_model(model)
-        w = (inp * WEIGHT_INPUT + out * WEIGHT_OUTPUT
-             + cc * WEIGHT_CACHE_CREATION + cr * WEIGHT_CACHE_READ)
+        w = ((inp * WEIGHT_INPUT + out * WEIGHT_OUTPUT
+              + cc * WEIGHT_CACHE_CREATION + cr * WEIGHT_CACHE_READ)
+             * model_cost(name))
         if ts >= week_start:
             snap.week_total += inp + out
             snap.week_weighted += w
@@ -2560,8 +2583,6 @@ class PanelWidget(QWidget):
             wbudget = weekly_budget_all()
             if wbudget:
                 self._animate_row(wk, snap.week_weighted / wbudget * 100.0)
-            else:
-                wk["pct"].setText("—")
             keys.add("week_all")
             for name, mb in weekly_model_budgets().items():
                 tokens = snap.week_by_model.get(name, 0)
@@ -2572,6 +2593,11 @@ class PanelWidget(QWidget):
                 mrow["reset"].setText(tr("tokens_n", n=fmt_de(tokens)) + wtail)
                 keys.add(mkey)
             self._show_only(keys)
+            if not wbudget:
+                # no learned weekly budget yet: show only the token count, not a
+                # percentage bar that can never fill
+                self._rows["week_all"]["pct"].setVisible(False)
+                self._rows["week_all"]["bar"].setVisible(False)
 
             hint = (tr("hint_manual") if is_calibrated()
                     else tr("hint_auto") if auto_budget_active()
@@ -2805,6 +2831,16 @@ class ClawdApp:
         self.settings = QSettings(ORG_NAME, APP_NAME)
         set_language(str(self.settings.value("language", "de") or "de"))
         self.snapshot = UsageSnapshot()
+
+        if self.settings.value("weight_version", 0, type=int) != WEIGHT_VERSION:
+            # the cost model changed, so any stored calibration is in the wrong
+            # scale — drop it so the user recalibrates once cleanly instead of
+            # seeing a confidently-wrong number
+            for _k in ("max_tokens", "auto_budget_5h", "weekly_budget_all",
+                       "weekly_anchor", "weekly_budget_models"):
+                self.settings.remove(_k)
+            reset_auto_calibration()
+            self.settings.setValue("weight_version", WEIGHT_VERSION)
 
         saved = self.settings.value("max_tokens")
         try:
@@ -3489,6 +3525,28 @@ def run_selftest() -> int:
     assert "week_all" in panel._rows and "week:Fable" in panel._rows
     print(f"[selftest] weekly window OK, week_total={panel._snap.week_total} "
           f"week_by_model={panel._snap.week_by_model}")
+
+    # per-model cost weighting: pricier models count more against the plan
+    assert model_cost("Opus") == 5.0 and model_cost("Fable") == 0.3
+    assert model_cost("Sonnet") == 1.0 and model_cost("Made-Up-Model") == 1.0
+    # regression: the placeholder budget must be on the cost-weighted scale, so
+    # a typical heavy all-Opus 5h window does not read a false >100% "limit"
+    typical_opus_weighted = 24_000_000        # ~ observed heavy all-Opus window
+    assert typical_opus_weighted / MAX_TOKENS * 100 < 100, \
+        "placeholder budget too small for cost-weighted scale -> false limit"
+
+    # weekly row shows no empty progress bar when the weekly budget is unknown
+    reset_auto_calibration()
+    assert weekly_budget_all() is None
+    nb = scan_usage()
+    nb.week_total = max(nb.week_total, 500_000)
+    panel.update_snapshot(nb)
+    app.processEvents()
+    assert "week_all" in panel._rows
+    assert panel._rows["week_all"]["bar"].isHidden(), "empty weekly bar still shown"
+    assert panel._rows["week_all"]["pct"].isHidden(), "dash percentage still shown"
+    assert panel._rows["week_all"]["reset"].text(), "weekly token count missing"
+    print("[selftest] model cost + weekly-bar-when-unbudgeted OK")
 
     # fixed-window replay: chained windows and fresh starts after silence
     base = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)

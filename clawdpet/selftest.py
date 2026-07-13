@@ -999,6 +999,134 @@ def run_selftest() -> int:
         assert pet.mood == "chill"
         print("[selftest] wander walk animation OK")
 
+    # --- F11 permission bubble: registration, protocol, widget, hook e2e ---
+    import socket as socket_mod
+    import subprocess
+    from .hooks import (permission_hook_registered, register_permission_hook,
+                        unregister_permission_hook)
+    from .permission_bubble import PermissionBubble
+
+    # registration is independent from the activity hooks
+    with tempfile.TemporaryDirectory() as td:
+        sp = Path(td) / "settings.json"
+        sp.write_text("{}", encoding="utf-8")
+        assert register_hooks(sp, 'py "clawd_hook.py"')
+        assert register_permission_hook(sp, 'py "clawd_permission_hook.py"')
+        assert hooks_registered(sp) and permission_hook_registered(sp)
+        pdata = json.loads(sp.read_text(encoding="utf-8"))
+        pentry = pdata["hooks"]["PermissionRequest"][0]["hooks"][0]
+        assert pentry["timeout"] == 20, "permission hook needs its timeout"
+        assert unregister_hooks(sp)                  # activity off ...
+        assert permission_hook_registered(sp), "permission entry lost"
+        assert not hooks_registered(sp)
+        assert unregister_permission_hook(sp)        # ... then permission off
+        assert not permission_hook_registered(sp)
+        perm_cmd = 'py "clawd_permission_hook.py"'    # dedup keys on the marker
+        assert register_permission_hook(sp, perm_cmd) and not \
+            register_permission_hook(sp, perm_cmd), "double registration"
+        unregister_permission_hook(sp)
+
+    # widget: ask -> decide fires exactly once, timeout timer is cancelled
+    perm_decisions = []
+    pb = PermissionBubble()
+    pb.ask("Bash", "git push origin main", pet, perm_decisions.append)
+    assert pb.active and not pb.grab().isNull()
+    pb.decide("allow")
+    pb.decide("deny")                                # idempotent no-op
+    assert perm_decisions == ["allow"] and not pb.active
+    assert not pb._timeout.isActive(), "timeout timer still running"
+
+    # app protocol: ack + decision reach the asking socket, token-prefixed
+    probe_sock = socket_mod.socket(socket_mod.AF_INET, socket_mod.SOCK_DGRAM)
+    probe_sock.bind(("127.0.0.1", 0))
+    probe_sock.settimeout(3.0)
+    probe_port = probe_sock.getsockname()[1]
+    from PyQt5.QtNetwork import QHostAddress
+    was_dnd = capp.dnd
+    capp.dnd = False
+    capp.pet.show()                                  # engagement needs a visible pet
+    capp._handle_permission_query(
+        {"id": "q1", "tool_name": "Bash", "detail": "ls"},
+        QHostAddress("127.0.0.1"), probe_port)
+    app.processEvents()                              # flush queued datagrams
+    for expected in ("ack", None):                   # ack now, decision on click
+        if expected is None:
+            capp.perm_bubble.decide("deny")
+            app.processEvents()
+        raw, _ = probe_sock.recvfrom(4096)
+        reply = parse_hook_datagram(raw, capp._hook_token)
+        assert reply and reply["id"] == "q1"
+        assert reply["type"] == (expected or "decision")
+    assert reply["decision"] == "deny"
+    # DND: no engagement, the hook must fall back to the terminal
+    capp.dnd = True
+    capp._handle_permission_query(
+        {"id": "q2", "tool_name": "Bash", "detail": ""},
+        QHostAddress("127.0.0.1"), probe_port)
+    probe_sock.settimeout(0.3)
+    try:
+        probe_sock.recvfrom(4096)
+        raise AssertionError("DND still engaged the permission bubble")
+    except socket_mod.timeout:
+        pass
+    capp.dnd = was_dnd
+    capp.pet.hide()
+    probe_sock.close()
+
+    # hook script end-to-end: fake pet answers allow -> hook prints decision
+    hook_py = Path(__file__).resolve().parent.parent / "clawd_permission_hook.py"
+    with tempfile.TemporaryDirectory() as td:
+        tokf = Path(td) / "hook_token"
+        tok = ensure_hook_token(tokf)
+        fake_pet = socket_mod.socket(socket_mod.AF_INET, socket_mod.SOCK_DGRAM)
+        fake_pet.bind(("127.0.0.1", 0))
+        fake_pet.settimeout(5.0)
+        env = dict(os.environ,
+                   CLAWD_PET_PORT=str(fake_pet.getsockname()[1]),
+                   CLAWD_TOKEN_FILE=str(tokf))
+        event = json.dumps({"hook_event_name": "PermissionRequest",
+                            "tool_name": "Bash",
+                            "tool_input": {"command": "git push"}})
+        proc = subprocess.Popen([sys.executable, str(hook_py)],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                env=env)
+        proc.stdin.write(event.encode("utf-8"))
+        proc.stdin.close()
+        raw, addr = fake_pet.recvfrom(4096)
+        q = parse_hook_datagram(raw, tok)
+        assert q and q["clawd_permission"]["tool_name"] == "Bash"
+        assert q["clawd_permission"]["detail"] == "git push"
+        qid = q["clawd_permission"]["id"]
+        for msg in ({"id": qid, "type": "ack"},
+                    {"id": qid, "type": "decision", "decision": "allow"}):
+            fake_pet.sendto(tok.encode() + b"\n" + json.dumps(msg).encode(), addr)
+        out = proc.stdout.read().decode("utf-8")
+        assert proc.wait(timeout=10) == 0
+        got = json.loads(out)
+        assert got["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+        # silent pet: the hook gives up fast and prints nothing (terminal wins)
+        t0 = time.monotonic()
+        proc2 = subprocess.run([sys.executable, str(hook_py)],
+                               input=event.encode("utf-8"),
+                               stdout=subprocess.PIPE, env=env, timeout=10)
+        assert proc2.returncode == 0 and proc2.stdout.strip() == b""
+        assert time.monotonic() - t0 < 5.0, "no-pet fallback too slow"
+        fake_pet.close()
+    print("[selftest] permission bubble OK")
+
+    # DND master toggle: settings round-trip, bubbles hidden
+    was = capp.settings.value("dnd")
+    capp.toggle_dnd()
+    assert capp.dnd is True and capp.settings.value("dnd", type=bool) is True
+    capp.toggle_dnd()
+    assert capp.dnd is False
+    if was is None:
+        capp.settings.remove("dnd")
+    from .focus import TERMINAL_APPS, focus_terminal
+    assert callable(focus_terminal)     # not invoked: would steal real focus
+    assert TERMINAL_APPS and TERMINAL_APPS[0] == "Warp"
+    print("[selftest] dnd + focus OK")
+
     print("[selftest] OK")
     del app
     return 0

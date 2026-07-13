@@ -34,7 +34,7 @@ Build the standalone exe yourself:
 
 ```bash
 pip install pyinstaller
-python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ico" --add-data "sprites;sprites" --add-data "sounds;sounds" --add-data "clawd_hook.py;." clawd_pet.py
+python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ico" --add-data "sprites;sprites" --add-data "sounds;sounds" --add-data "clawd_hook.py;." --add-data "clawd_permission_hook.py;." clawd_pet.py
 ```
 
 ## Code layout
@@ -114,6 +114,16 @@ calibration), `api` (read-only live sync), `activity`/`hooks` (real time),
   `settings.json` is kept and the entry can be removed from the same menu.
   Events are authenticated with a local token (`~/.clawd/hook_token`), so no
   other process on the machine can spoof them.
+- **Permission bubble (beta, opt-in):** when Claude Code asks for a
+  permission, a small Allow/Deny card pops up at the pet — one click answers
+  the prompt without switching to the terminal. Fail-open by design: if you
+  don't react (or the pet isn't running), the normal terminal prompt takes
+  over after a short moment. Uses the dedicated `PermissionRequest` hook and
+  the same authenticated local channel.
+- **Do not disturb:** one tray toggle mutes bubbles, toasts and chimes at
+  once (permission questions then stay in the terminal). And clicking a
+  "Claude needs you" bubble brings your terminal to the front (macOS; Warp,
+  iTerm2, Terminal, VS Code, Cursor).
 - **Pet him:** double-click Clawd and hearts float up. Grab him and fling
   him — he flies in an arc, bounces off the screen edges and lands back on
   his feet. Sneak your cursor up on him while he sleeps and he wakes with a

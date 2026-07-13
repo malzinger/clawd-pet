@@ -19,20 +19,20 @@ from .config import CLAUDE_SETTINGS_FILE, HOOK_EVENTS, HOOK_TOKEN_FILE
 #   ~/.claude/settings.json and is only touched from the tray menu.)
 # ======================================================================
 
-def hook_command() -> Optional[str]:
-    """Command line for the Claude Code hook, or None if unavailable."""
+def hook_command(script: str = "clawd_hook.py") -> Optional[str]:
+    """Command line for a Claude Code hook script, or None if unavailable."""
     if getattr(sys, "frozen", False):
-        src = Path(getattr(sys, "_MEIPASS", "")) / "clawd_hook.py"
-        dst = Path.home() / ".claude" / "clawd_hook.py"
+        src = Path(getattr(sys, "_MEIPASS", "")) / script
+        dst = Path.home() / ".claude" / script
         try:
             shutil.copy2(src, dst)
         except OSError:
             return None
         hook_py = dst
     else:
-        # clawd_hook.py lives next to the clawd_pet.py entry point, one
+        # the hook scripts live next to the clawd_pet.py entry point, one
         # level above this package
-        hook_py = Path(__file__).resolve().parent.parent / "clawd_hook.py"
+        hook_py = Path(__file__).resolve().parent.parent / script
         if not hook_py.is_file():
             return None
     runner = (shutil.which("pythonw") or shutil.which("pyw")
@@ -164,12 +164,68 @@ def refresh_hook_copy() -> None:
     in the repo and updates together with the app — nothing to do."""
     if not getattr(sys, "frozen", False):
         return
-    if not hooks_registered(CLAUDE_SETTINGS_FILE):
-        return
-    src = Path(getattr(sys, "_MEIPASS", "")) / "clawd_hook.py"
-    dst = Path.home() / ".claude" / "clawd_hook.py"
-    try:
-        if src.is_file():
-            shutil.copy2(src, dst)
-    except OSError:
-        pass                       # best effort — the log watcher still works
+    for script, registered in (
+            ("clawd_hook.py", hooks_registered),
+            ("clawd_permission_hook.py", permission_hook_registered)):
+        if not registered(CLAUDE_SETTINGS_FILE):
+            continue
+        src = Path(getattr(sys, "_MEIPASS", "")) / script
+        dst = Path.home() / ".claude" / script
+        try:
+            if src.is_file():
+                shutil.copy2(src, dst)
+        except OSError:
+            pass                   # best effort — the log watcher still works
+
+
+# --- permission bubble (F11): a second, independent hook registration -----
+# The marker strings differ ("clawd_permission_hook.py" does not contain
+# "clawd_hook.py"), so the activity hooks and the permission hook can be
+# enabled/disabled independently through the same settings.json machinery.
+PERMISSION_MARKER = "clawd_permission_hook.py"
+PERMISSION_EVENT = "PermissionRequest"
+PERMISSION_HOOK_TIMEOUT_S = 20      # > the script's own 0.5 s + 15 s budget
+
+
+def permission_hook_registered(settings_path: Path) -> bool:
+    data = _load_settings(settings_path)
+    if not isinstance(data, dict):
+        return False
+    return PERMISSION_MARKER in json.dumps(data.get("hooks", {}))
+
+
+def register_permission_hook(settings_path: Path, command: str) -> bool:
+    data = _load_settings(settings_path)
+    if not isinstance(data, dict):
+        return False
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        return False
+    arr = hooks.setdefault(PERMISSION_EVENT, [])
+    if not isinstance(arr, list):
+        return False
+    if any(PERMISSION_MARKER in json.dumps(entry) for entry in arr):
+        return False                    # already registered
+    arr.append({"matcher": "", "hooks": [{
+        "type": "command", "command": command,
+        "timeout": PERMISSION_HOOK_TIMEOUT_S,
+    }]})
+    return _write_settings(settings_path, data)
+
+
+def unregister_permission_hook(settings_path: Path) -> bool:
+    data = _load_settings(settings_path)
+    if not isinstance(data, dict):
+        return False
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    changed = False
+    for event, arr in hooks.items():
+        if not isinstance(arr, list):
+            continue
+        kept = [e for e in arr if PERMISSION_MARKER not in json.dumps(e)]
+        if len(kept) != len(arr):
+            hooks[event] = kept
+            changed = True
+    return changed and _write_settings(settings_path, data)

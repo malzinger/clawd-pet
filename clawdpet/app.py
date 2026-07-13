@@ -60,16 +60,21 @@ from .config import (
     WAIT_ALERT_MIN_S,
     WEIGHT_VERSION,
 )
+from .focus import focus_terminal
 from .history import HistoryStore
 from .hooks import (
     ensure_hook_token,
     hook_command,
     hooks_registered,
     parse_hook_datagram,
+    permission_hook_registered,
     refresh_hook_copy,
     register_hooks,
+    register_permission_hook,
     unregister_hooks,
+    unregister_permission_hook,
 )
+from .permission_bubble import PermissionBubble
 from .i18n import (
     fmt_de,
     fmt_pct_de,
@@ -150,11 +155,13 @@ class ClawdApp:
         self.panel = PanelWidget()
         self.panel.on_leave = self.schedule_panel_hide
         self.bubble = SpeechBubble()
+        self.perm_bubble = PermissionBubble()   # F11 Allow/Deny callout
 
         # real-time activity: log watcher (Stufe 1) + hook receiver (Stufe 2)
         self.quiet = self.settings.value("quiet", False, type=bool)
         self.notify_enabled = self.settings.value("notify", True, type=bool)
         self.notify_sound = self.settings.value("notify_sound", False, type=bool)
+        self.dnd = self.settings.value("dnd", False, type=bool)   # master mute
         self.wander = self.settings.value("wander", False, type=bool)
         self.click_through = self.settings.value("click_through", False, type=bool)
         # burn-rate history and last pct are kept PER SOURCE ("api"/"logs"):
@@ -186,6 +193,11 @@ class ClawdApp:
         self._udp = QUdpSocket()
         if self._udp.bind(QHostAddress.LocalHost, HOOK_UDP_PORT):
             self._udp.readyRead.connect(self._read_hook_datagrams)
+        # Replies (permission ack/decision) go through their own ephemeral
+        # socket: Qt refuses writeDatagram on an unbound socket, and the main
+        # one stays unbound when another instance already holds the hook port.
+        self._udp_reply = QUdpSocket()
+        self._udp_reply.bind(QHostAddress.LocalHost, 0)
 
         self._scan_thread: Optional[ScanThread] = None
         self._scan_timer = QTimer()
@@ -239,11 +251,13 @@ class ClawdApp:
             self._update_timer.start()
 
     def quit(self):
+        self.perm_bubble.decide("pass")   # unblock a waiting hook fast
         self.save_position()
         self._scan_timer.stop()
         self._activity_timer.stop()
         self._update_timer.stop()
         self._udp.close()
+        self._udp_reply.close()
         thread = self._scan_thread
         if thread is not None and thread.isRunning():
             thread.requestInterruption()
@@ -299,6 +313,11 @@ class ClawdApp:
         menu.addAction(act_panel)
 
         menu.addSeparator()
+        act_dnd = QAction(tr("menu_dnd_off") if self.dnd
+                          else tr("menu_dnd_on"), menu)
+        act_dnd.triggered.connect(self.toggle_dnd)
+        menu.addAction(act_dnd)
+
         act_quiet = QAction(tr("menu_quiet_on") if self.quiet
                             else tr("menu_quiet_off"), menu)
         act_quiet.triggered.connect(self.toggle_quiet)
@@ -325,6 +344,14 @@ class ClawdApp:
             act_hooks = QAction(tr("menu_hooks_on"), menu)
             act_hooks.triggered.connect(self.enable_hooks)
         menu.addAction(act_hooks)
+
+        if permission_hook_registered(CLAUDE_SETTINGS_FILE):
+            act_perm = QAction(tr("menu_perm_off"), menu)
+            act_perm.triggered.connect(self.disable_permission_bubble)
+        else:
+            act_perm = QAction(tr("menu_perm_on"), menu)
+            act_perm.triggered.connect(self.enable_permission_bubble)
+        menu.addAction(act_perm)
 
         act_cal = QAction(tr("menu_cal"), menu)
         act_cal.triggered.connect(self.calibrate)
@@ -533,7 +560,7 @@ class ClawdApp:
         prev = self._last_activity
         self._last_activity = act
         self.pet.set_activity(act)
-        if act == prev or self.quiet or not self.pet.isVisible():
+        if act == prev or self.quiet or self.dnd or not self.pet.isVisible():
             return
         if act and act[0] == "working" and act[1]:
             text = (tool_action(ctx.tool, ctx.detail) if ctx else None) \
@@ -545,12 +572,46 @@ class ClawdApp:
 
     def _read_hook_datagrams(self):
         while self._udp.hasPendingDatagrams():
-            data, _host, _port = self._udp.readDatagram(65535)
+            data, host, port = self._udp.readDatagram(65535)
             # only accept datagrams carrying the shared token — any local
             # process can send UDP to 127.0.0.1 (see hooks.parse_hook_datagram)
             event = parse_hook_datagram(bytes(data), self._hook_token)
-            if event is not None:
+            if event is None:
+                continue
+            query = event.get("clawd_permission")
+            if isinstance(query, dict):
+                self._handle_permission_query(query, host, port)
+            else:
                 self._handle_hook_event(event)
+
+    # ------------------------------------------- permission bubble (F11)
+
+    def _reply_perm(self, host, port, payload: dict):
+        """Token-prefixed reply straight back to the waiting hook process."""
+        data = (self._hook_token.encode("utf-8") + b"\n"
+                + json.dumps(payload).encode("utf-8"))
+        self._udp_reply.writeDatagram(data, host, port)
+
+    def _handle_permission_query(self, query: dict, host, port):
+        """A clawd_permission_hook.py process is blocked on a permission
+        prompt and asks us to decide. We only engage (ack) when we can show
+        the bubble — everything else stays silent so the hook falls back to
+        the normal terminal prompt within half a second."""
+        qid = query.get("id")
+        if not isinstance(qid, str) or not qid:
+            return
+        if (self.dnd                     # do-not-disturb: terminal decides
+                or not self.pet.isVisible()
+                or self.perm_bubble.active):   # one question at a time
+            return
+        tool = str(query.get("tool_name") or "?")
+        detail = str(query.get("detail") or "")
+        self._reply_perm(host, port, {"id": qid, "type": "ack"})
+        self.perm_bubble.ask(
+            tool, detail, self.pet,
+            on_decide=lambda decision: self._reply_perm(
+                host, port, {"id": qid, "type": "decision",
+                             "decision": decision}))
 
     def _handle_hook_event(self, event: dict):
         name = event.get("hook_event_name") or ""
@@ -576,9 +637,11 @@ class ClawdApp:
         if act is not None:
             self._last_activity = act
             self.pet.set_activity(act)
-        if text and not self.quiet and self.pet.isVisible():
+        if text and not self.quiet and not self.dnd and self.pet.isVisible():
+            # a "needs you" bubble jumps to the terminal when clicked
             self.bubble.show_text(
-                text, self.pet, 8000 if name == "Notification" else 4200)
+                text, self.pet, 8000 if name == "Notification" else 4200,
+                on_click=focus_terminal if name == "Notification" else None)
 
     def _clear_error_state(self):
         if self.pet._activity and self.pet._activity[0] == "error":
@@ -612,7 +675,7 @@ class ClawdApp:
         """A 'your turn' tray toast, rate-limited so near-simultaneous
         triggers (a hook and the log poll) do not double-fire."""
         now = time.monotonic()
-        if (not self.notify_enabled or self.tray is None
+        if (not self.notify_enabled or self.dnd or self.tray is None
                 or now - self._last_alert_mono < ALERT_COOLDOWN_S):
             return
         self._last_alert_mono = now
@@ -742,7 +805,8 @@ class ClawdApp:
         prev = self._prev_pct.get(source)
         self._prev_pct[source] = pct
         kind = notify_decision(prev, pct)
-        if kind is None or self.tray is None or not self.notify_enabled:
+        if (kind is None or self.tray is None or not self.notify_enabled
+                or self.dnd):
             return
         icon = (QSystemTrayIcon.Information if kind == "reset"
                 else QSystemTrayIcon.Warning)
@@ -764,6 +828,32 @@ class ClawdApp:
 
     def disable_hooks(self):
         unregister_hooks(CLAUDE_SETTINGS_FILE)
+        self._rebuild_tray_menu()
+
+    def toggle_dnd(self):
+        """Master mute: bubbles, toasts, chimes and permission engagement."""
+        self.dnd = not self.dnd
+        self.settings.setValue("dnd", self.dnd)
+        if self.dnd:
+            self.bubble.hide()
+            self.perm_bubble.decide("pass")   # open question -> terminal
+        self._rebuild_tray_menu()
+
+    def enable_permission_bubble(self):
+        command = hook_command("clawd_permission_hook.py")
+        if not command:
+            QMessageBox.warning(
+                None, tr("hooks_py_title"), tr("hooks_py_text"))
+            return
+        if register_permission_hook(CLAUDE_SETTINGS_FILE, command):
+            QMessageBox.information(
+                None, tr("perm_on_title"),
+                tr("perm_on_text", f=f"{CLAUDE_SETTINGS_FILE.name}.clawd-bak"))
+        self._rebuild_tray_menu()
+
+    def disable_permission_bubble(self):
+        unregister_permission_hook(CLAUDE_SETTINGS_FILE)
+        self.perm_bubble.decide("pass")
         self._rebuild_tray_menu()
 
     # -------------------------------------------------- calibration

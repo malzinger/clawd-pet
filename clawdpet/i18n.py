@@ -185,6 +185,20 @@ STRINGS = {
         "clawd_login_nocode": "Kein Code eingegeben.",
         # --- sound test ---
         "menu_sound_test": "Sound testen",
+        # --- permission bubble (F11) + DND ---
+        "menu_perm_on": "Permission-Bubble aktivieren (Beta)",
+        "menu_perm_off": "Permission-Bubble deaktivieren",
+        "perm_on_title": "Permission-Bubble aktiviert",
+        "perm_on_text": "Fragt Claude Code ab der nächsten Session nach einer "
+                        "Berechtigung,\nerscheint eine Bubble am Pet: Erlauben/"
+                        "Ablehnen per Klick.\nKeine Reaktion → der normale "
+                        "Terminal-Prompt übernimmt.\n\nBackup der "
+                        "Einstellungen: {f}",
+        "perm_question": "Claude fragt: {tool} erlauben?",
+        "perm_allow": "✓ Erlauben",
+        "perm_deny": "✕ Ablehnen",
+        "menu_dnd_on": "Nicht stören aktivieren",
+        "menu_dnd_off": "Nicht stören deaktivieren",
     },
     "en": {
         "panel_title": "Plan usage limits · {plan}",
@@ -301,6 +315,19 @@ STRINGS = {
         "clawd_login_nocode": "No code entered.",
         # --- sound test ---
         "menu_sound_test": "Test sound",
+        # --- permission bubble (F11) + DND ---
+        "menu_perm_on": "Enable permission bubble (beta)",
+        "menu_perm_off": "Disable permission bubble",
+        "perm_on_title": "Permission bubble enabled",
+        "perm_on_text": "From the next session on, when Claude Code asks for "
+                        "a permission,\na bubble appears at the pet: "
+                        "Allow/Deny with one click.\nNo reaction → the normal "
+                        "terminal prompt takes over.\n\nSettings backup: {f}",
+        "perm_question": "Claude asks: allow {tool}?",
+        "perm_allow": "✓ Allow",
+        "perm_deny": "✕ Deny",
+        "menu_dnd_on": "Enable do not disturb",
+        "menu_dnd_off": "Disable do not disturb",
     },
 }
 

@@ -35,7 +35,7 @@ Die eigenständige exe selbst bauen:
 
 ```bash
 pip install pyinstaller
-python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ico" --add-data "sprites;sprites" --add-data "sounds;sounds" --add-data "clawd_hook.py;." clawd_pet.py
+python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ico" --add-data "sprites;sprites" --add-data "sounds;sounds" --add-data "clawd_hook.py;." --add-data "clawd_permission_hook.py;." clawd_pet.py
 ```
 
 ## Code-Aufbau
@@ -118,6 +118,16 @@ Paket `clawdpet/` — grob: `usage` (Log-Scan, 5-h-Fenster, Kalibrierung),
   Die Events sind mit einem lokalen Token (`~/.clawd/hook_token`)
   authentifiziert, damit kein anderer Prozess auf dem Rechner sie fälschen
   kann.
+- **Permission-Bubble (Beta, opt-in):** Fragt Claude Code nach einer
+  Berechtigung, erscheint eine kleine Erlauben/Ablehnen-Karte am Pet — ein
+  Klick beantwortet den Prompt, ohne ins Terminal zu wechseln. Fail-open:
+  Reagierst du nicht (oder läuft das Pet nicht), übernimmt nach einem kurzen
+  Moment der normale Terminal-Prompt. Nutzt den dedizierten
+  `PermissionRequest`-Hook und denselben authentifizierten lokalen Kanal.
+- **Nicht stören:** Ein Tray-Schalter stellt Sprechblasen, Toasts und Sounds
+  auf einmal stumm (Permission-Fragen bleiben dann im Terminal). Und ein
+  Klick auf eine „Claude braucht dich"-Bubble holt dein Terminal nach vorn
+  (macOS; Warp, iTerm2, Terminal, VS Code, Cursor).
 - **Streicheln:** Doppelklick auf Clawd lässt Herzchen aufsteigen. Pack ihn
   und schleudere ihn — er fliegt im Bogen, prallt an den Bildschirmkanten ab
   und landet wieder auf den Füßen. Schleicht sich der Mauszeiger an den

@@ -562,7 +562,7 @@ def run_selftest() -> int:
     print("[selftest] hook datagram auth OK")
 
     # file-cache pruning: entries of files outside the horizon are dropped
-    _FILE_CACHE["/nonexistent/stale-session.jsonl"] = (0, 0, [])
+    _FILE_CACHE["/nonexistent/stale-session.jsonl"] = (0, 0, [], "")
     scan_usage()
     assert "/nonexistent/stale-session.jsonl" not in _FILE_CACHE, \
         "stale file-cache entry survived a full scan"
@@ -575,6 +575,83 @@ def run_selftest() -> int:
     assert not is_trusted_update_url("https://github.com/someone-else/repo/x")
     assert not is_trusted_update_url("")
     print("[selftest] update-url whitelist OK")
+
+    # --- W1-B: cost + projects ---
+    from .config import SONNET_INPUT_USD_PER_MTOK
+    from .usage import _parse_file_entries
+
+    # F10 backend: the per-project split is dedup-consistent with the total
+    fresh = scan_usage()
+    assert isinstance(fresh.by_project, dict)
+    assert isinstance(fresh.by_project_weighted, dict)
+    assert sum(fresh.by_project.values()) == fresh.total, \
+        "per-project token split does not add up to the window total"
+    if fresh.by_project:
+        assert all(isinstance(k, str) and k for k in fresh.by_project), \
+            "empty project key in by_project"
+
+    # F10 synthetic: project (cwd) extracted from a session log and attached
+    # to each parsed entry, cache tuple carries the cwd as its 4th element
+    with tempfile.TemporaryDirectory() as td:
+        plog = Path(td) / "proj-session.jsonl"
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        plog.write_text(
+            json.dumps({"type": "user", "cwd": "C:/Users/x/dev/demo proj",
+                        "message": {"content": "hi"}}) + "\n"
+            + json.dumps({"type": "assistant", "timestamp": now_iso,
+                          "message": {"id": "msg_w1b_1",
+                                      "model": "claude-sonnet-4",
+                                      "usage": {"input_tokens": 100,
+                                                "output_tokens": 50}}}) + "\n",
+            encoding="utf-8")
+        pentries = _parse_file_entries(plog)
+        assert len(pentries) == 1, f"unexpected entries: {pentries!r}"
+        assert pentries[0][7] == "C:/Users/x/dev/demo proj", \
+            "cwd not attached to the parsed entry"
+        assert Path(pentries[0][7]).name == "demo proj"
+        assert _FILE_CACHE[str(plog)][3] == "C:/Users/x/dev/demo proj"
+        del _FILE_CACHE[str(plog)]      # scratch file, keep the cache clean
+
+    # F4 backend: weighted units x Sonnet input price = API-cost equivalent
+    xpanel = PanelWidget()
+    cost_snap = UsageSnapshot(weighted=2_000_000, week_weighted=10_000_000,
+                              updated_at=datetime.now(), pct=10.0)
+    cost_snap.by_project = {"clawd-pet": 1_000, "other": 500}
+    cost_snap.by_project_weighted = {"clawd-pet": 1_500_000.0,
+                                     "other": 500_000.0}
+    xpanel.update_snapshot(cost_snap)
+    assert not xpanel.cost_label.isHidden(), "cost line hidden despite usage"
+    assert "$6.00" in xpanel.cost_label.text(), xpanel.cost_label.text()
+    assert "$30.00" in xpanel.cost_label.text(), xpanel.cost_label.text()
+    assert "clawd-pet 75%" in xpanel.projects_label.text(), \
+        xpanel.projects_label.text()
+    assert "other 25%" in xpanel.projects_label.text()
+    zero_snap = UsageSnapshot(updated_at=datetime.now())
+    xpanel.update_snapshot(zero_snap)
+    assert not xpanel.cost_label.text(), "cost line shown without usage"
+    assert xpanel.cost_label.isHidden()
+    assert not xpanel.projects_label.text(), "projects line shown without data"
+    only_q = UsageSnapshot(weighted=1_000_000, updated_at=datetime.now())
+    only_q.by_project_weighted = {"?": 1_000_000.0}
+    xpanel.update_snapshot(only_q)
+    assert not xpanel.projects_label.text(), "'?' pseudo-project shown"
+
+    # F4/F10 frontend: rendered off-screen, new labels must not be clipped
+    xpanel.update_snapshot(cost_snap)
+    xpanel.move(-4000, -4000)
+    xpanel.show()
+    app.processEvents()
+    assert not xpanel.grab().isNull(), "cost/projects panel render failed"
+    for w in (xpanel.cost_label, xpanel.projects_label):
+        assert w.text() and not w.isHidden()
+        need = w.fontMetrics().boundingRect(
+            QRect(0, 0, w.width(), 10_000),
+            Qt.TextWordWrap if w.wordWrap() else 0, w.text())
+        assert need.width() <= w.width() + 1 and need.height() <= w.height() + 1, \
+            f"cost/projects label clipped: {w.text()[:40]!r}"
+    xpanel.hide()
+    assert SONNET_INPUT_USD_PER_MTOK == 3.0
+    print("[selftest] cost estimate + project split OK")
 
     print("[selftest] OK")
     del app

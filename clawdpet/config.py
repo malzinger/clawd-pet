@@ -128,3 +128,10 @@ HISTORY_KEEP_DAYS = 7              # prune points older than this
 HISTORY_WINDOW_H = 24             # span shown in the panel sparkline
 HISTORY_GAP_S = 1800              # break the line across gaps longer than this
 
+# --- cost estimate (F4) ---
+# Public API price for Sonnet input, USD per million tokens. The cost-weighted
+# usage sum (WEIGHT_* x MODEL_COST) is expressed in Sonnet-input-token
+# equivalents, so weighted units x this price = the approximate API price the
+# same usage would have cost on pay-as-you-go.
+SONNET_INPUT_USD_PER_MTOK = 3.0
+

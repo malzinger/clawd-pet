@@ -54,6 +54,8 @@ class UsageSnapshot:
     by_model_weighted: dict = field(default_factory=dict)
     week_by_model_weighted: dict = field(default_factory=dict)
     burn_eta: Optional[datetime] = None           # projected time of hitting 100 %
+    by_project: dict = field(default_factory=dict)  # project name -> in+out (5h window)
+    by_project_weighted: dict = field(default_factory=dict)
 
 
 _MAX_TOKENS_OVERRIDE: Optional[int] = None      # set once manually calibrated
@@ -150,14 +152,16 @@ def _parse_iso_ts(raw) -> Optional[datetime]:
         return None
 
 
-_FILE_CACHE: dict = {}      # path -> (mtime_ns, size, entries) — worker thread only
+_FILE_CACHE: dict = {}   # path -> (mtime_ns, size, entries, cwd) — worker thread only
 
 
 def _parse_file_entries(fp: Path) -> list:
     """All usage entries of one session log, cached by (mtime, size).
 
     Finished session files never change, so each is parsed exactly once per
-    process; only actively written logs are re-read on the 20 s rescans."""
+    process; only actively written logs are re-read on the 20 s rescans.
+    The file's project directory (first non-empty "cwd" record) is attached
+    to every entry, so it survives the cross-file message-id dedup."""
     try:
         st = fp.stat()
     except OSError:
@@ -167,16 +171,24 @@ def _parse_file_entries(fp: Path) -> list:
     if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
         return cached[2]
     entries = []
+    cwd = ""
     try:
         with open(fp, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
-                if '"usage"' not in line:
+                has_usage = '"usage"' in line
+                if not has_usage and (cwd or '"cwd"' not in line):
                     continue
                 try:
                     rec = json.loads(line)
                 except (json.JSONDecodeError, ValueError):
                     continue
                 if not isinstance(rec, dict):
+                    continue
+                if not cwd:
+                    c = rec.get("cwd")
+                    if isinstance(c, str) and c:
+                        cwd = c
+                if not has_usage:
                     continue
                 ts = _parse_iso_ts(rec.get("timestamp"))
                 if ts is None:
@@ -197,7 +209,9 @@ def _parse_file_entries(fp: Path) -> list:
                 entries.append(entry)
     except OSError:
         return []
-    _FILE_CACHE[key] = (st.st_mtime_ns, st.st_size, entries)
+    for entry in entries:     # cwd may appear after the first usage line
+        entry.append(cwd)
+    _FILE_CACHE[key] = (st.st_mtime_ns, st.st_size, entries, cwd)
     return entries
 
 
@@ -334,7 +348,7 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
     snap.week_start = week_start
     snap.week_reset = week_reset
 
-    for inp, out, cr, cc, ts, model, _mid in all_entries:
+    for inp, out, cr, cc, ts, model, _mid, cwd in all_entries:
         name = pretty_model(model)
         w = ((inp * WEIGHT_INPUT + out * WEIGHT_OUTPUT
               + cc * WEIGHT_CACHE_CREATION + cr * WEIGHT_CACHE_READ)
@@ -355,6 +369,10 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
         snap.weighted += w
         snap.by_model[name] = snap.by_model.get(name, 0) + inp + out
         snap.by_model_weighted[name] = snap.by_model_weighted.get(name, 0.0) + w
+        proj = (Path(cwd).name or "?") if cwd else "?"
+        snap.by_project[proj] = snap.by_project.get(proj, 0) + inp + out
+        snap.by_project_weighted[proj] = (
+            snap.by_project_weighted.get(proj, 0.0) + w)
 
     snap.total = snap.input_tokens + snap.output_tokens
     budget = effective_max_tokens()

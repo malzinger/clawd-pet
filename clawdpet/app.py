@@ -28,7 +28,7 @@ from PyQt5.QtWidgets import (
     QSystemTrayIcon,
 )
 
-from .activity import read_session_context
+from .activity import newest_codex_log, read_codex_context, read_session_context
 from .api import collect_usage
 from .art import make_app_icon
 from .autostart import autostart_enabled, autostart_supported, set_autostart
@@ -427,12 +427,22 @@ class ClawdApp:
 
     def _check_activity(self):
         ctx = read_session_context(self._newest_log) if self._newest_log else None
+        log = self._newest_log
+        if ctx is None:
+            # Codex CLI fallback (F6): only when no Claude session is active —
+            # Claude logs always win. The codex log then carries the work-log
+            # identity below, so the turn timer and the cross-session guard
+            # keep working across both worlds.
+            codex_log = newest_codex_log()
+            if codex_log is not None:
+                ctx = read_codex_context(codex_log)
+                if ctx is not None:
+                    log = codex_log
         self._session_ctx = ctx
         # turn timer + "your turn" alert, keyed to the session log so a switch
         # between concurrent sessions never fakes a turn-end or a cross-session
         # timer (self._newest_log is the newest log across ALL projects)
         kind = ctx.kind if ctx else None
-        log = self._newest_log
         if kind == "working" and self._work_kind == "working" and log == self._work_log:
             pass                                    # same working phase continues
         elif kind == "working":

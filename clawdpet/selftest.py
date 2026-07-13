@@ -605,6 +605,81 @@ def run_selftest() -> int:
     pet.set_activity(_w1a_activity)
     print("[selftest] W1-A pet behavior OK")
 
+    # --- W1-C: codex activity ---
+    # Codex CLI fallback: mtime-based detection + best-effort task extraction
+    from . import app as app_mod
+    from .activity import newest_codex_log, read_codex_context
+    from .config import CODEX_ACTIVE_S
+    with tempfile.TemporaryDirectory() as td:
+        cbase = Path(td) / "sessions"
+        assert newest_codex_log(cbase) is None            # missing base dir
+        cbase.mkdir(parents=True)
+        assert newest_codex_log(cbase) is None            # empty base dir
+        fresh = cbase / "2026" / "07" / "rollout-fresh.jsonl"
+        fresh.parent.mkdir(parents=True)
+        fresh.write_text('{"type":"user_message","content":"fix the tests"}\n',
+                         encoding="utf-8")
+        stale = cbase / "rollout-old.jsonl"
+        stale.write_text("{}\n", encoding="utf-8")
+        cnow = time.time()
+        os.utime(fresh, (cnow, cnow))
+        os.utime(stale, (cnow - 1000, cnow - 1000))
+        assert newest_codex_log(cbase) == fresh           # fresh beats old
+        os.utime(fresh, (cnow - ACTIVITY_IDLE_S - 60,) * 2)
+        assert newest_codex_log(cbase) is None            # everything idle
+
+        # read_codex_context: kind by mtime age, fixed project label, task tail
+        os.utime(fresh, (cnow, cnow))
+        cctx = read_codex_context(fresh)
+        assert cctx and cctx.kind == "working" and cctx.tool is None
+        assert cctx.project == "Codex CLI"
+        assert "fix the tests" in cctx.task               # best-effort extraction
+        assert CODEX_ACTIVE_S < 60 < ACTIVITY_IDLE_S
+        os.utime(fresh, (cnow - 60, cnow - 60))
+        cctx = read_codex_context(fresh)
+        assert cctx and cctx.kind == "waiting"
+        os.utime(fresh, (cnow - ACTIVITY_IDLE_S - 60,) * 2)
+        assert read_codex_context(fresh) is None          # too old -> idle
+        # binary garbage / broken JSON must not raise; task stays ""
+        junk = cbase / "junk.jsonl"
+        junk.write_bytes(b"\x00\xff\xfe not json\n{broken json\n")
+        os.utime(junk, (cnow, cnow))
+        jctx = read_codex_context(junk)
+        assert jctx and jctx.kind == "working" and jctx.task == ""
+        # payload-wrapped record shape (observed Codex rollout format)
+        wrapped = cbase / "wrapped.jsonl"
+        wrapped.write_text(json.dumps({"payload": {
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "refactor the scanner"}],
+        }}) + "\n", encoding="utf-8")
+        os.utime(wrapped, (cnow, cnow))
+        wctx = read_codex_context(wrapped)
+        assert wctx and "refactor the scanner" in wctx.task
+
+        # app integration: without a Claude log the Codex fallback drives
+        # set_task and takes over the work-log identity (turn timer runs)
+        cnow2 = time.time()
+        os.utime(fresh, (cnow2, cnow2))
+        saved_state = (capp._work_kind, capp._work_log, capp._work_started_mono,
+                       capp._newest_log, capp._session_ctx, capp._last_activity)
+        orig_newest_codex = app_mod.newest_codex_log
+        app_mod.newest_codex_log = lambda: fresh
+        try:
+            capp._newest_log = None                       # no active Claude log
+            capp._work_kind = None
+            capp._work_log = None
+            capp._work_started_mono = None
+            capp._check_activity()
+            assert capp._session_ctx is not None
+            assert capp._session_ctx.project == "Codex CLI"
+            assert capp._work_kind == "working" and capp._work_log == fresh
+            assert capp._work_started_mono is not None
+        finally:
+            app_mod.newest_codex_log = orig_newest_codex
+            (capp._work_kind, capp._work_log, capp._work_started_mono,
+             capp._newest_log, capp._session_ctx, capp._last_activity) = saved_state
+    print("[selftest] codex activity OK")
+
     print("[selftest] OK")
     del app
     return 0

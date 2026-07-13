@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .config import ACTIVITY_IDLE_S
+from .config import ACTIVITY_IDLE_S, CODEX_ACTIVE_S, CODEX_SESSIONS_DIR
 
 def tool_detail(name, inp) -> str:
     """Extract the concrete target from a tool_use input block (best effort)."""
@@ -127,3 +127,131 @@ def read_last_activity(path: Path, now: Optional[datetime] = None):
     """Backward-compatible activity tuple derived from the session context."""
     ctx = read_session_context(path, now)
     return (ctx.kind, ctx.tool) if ctx and ctx.kind else None
+
+
+# ----------------------------------------------------------------------
+#  Codex CLI fallback (F6) — mtime-based, tolerant of an unknown format
+# ----------------------------------------------------------------------
+
+def newest_codex_log(base: Path = CODEX_SESSIONS_DIR,
+                     now: Optional[datetime] = None) -> Optional[Path]:
+    """The newest still-active Codex CLI session log under base, or None.
+
+    Codex CLI (OpenAI) drops *.jsonl rollout logs into nested date folders;
+    only the mtime matters here — a log untouched for ACTIVITY_IDLE_S has
+    gone quiet, exactly like a Claude session log. base/now are parameters
+    for testability.
+    """
+    try:
+        if not base.is_dir():
+            return None
+    except OSError:
+        return None
+    now_ts = (now or datetime.now(timezone.utc)).timestamp()
+    best = None
+    best_mtime = 0.0
+    try:
+        for f in base.rglob("*.jsonl"):
+            try:
+                mtime = f.stat().st_mtime
+            except OSError:
+                continue                  # racing deletion / permission — skip
+            if now_ts - mtime > ACTIVITY_IDLE_S:
+                continue
+            if best is None or mtime > best_mtime:
+                best, best_mtime = f, mtime
+    except OSError:
+        pass                              # directory vanished mid-walk
+    return best
+
+
+def _codex_text_field(value) -> str:
+    """Plain prompt text from a string or list-of-blocks value, or ''.
+
+    Strings starting with '<' are system/context wrappers, not typed prompts.
+    """
+    if isinstance(value, str):
+        parts = [value]
+    elif isinstance(value, list):
+        parts = []
+        for block in value:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+    else:
+        return ""
+    s = " ".join(" ".join(parts).split())
+    return "" if not s or s.startswith("<") else s
+
+
+def _codex_user_text(rec: dict) -> str:
+    """A user-prompt-looking text from one Codex log record, or ''.
+
+    Deliberately conservative: Codex wraps records in a few observed shapes
+    ({"payload": {...}} or the record itself), and only candidates whose
+    "type" mentions "user" or whose "role" is "user" are considered. Text is
+    pulled from the common "content"/"text"/"message" fields. Anything
+    unrecognized yields '' — guessing wrong would show garbage in the panel.
+    """
+    for cand in (rec.get("payload"), rec):
+        if not isinstance(cand, dict):
+            continue
+        rtype = cand.get("type")
+        typed_user = isinstance(rtype, str) and "user" in rtype.lower()
+        if not typed_user and cand.get("role") != "user":
+            continue
+        for key in ("content", "text", "message"):
+            txt = _codex_text_field(cand.get(key))
+            if txt:
+                return txt
+    return ""
+
+
+def read_codex_context(path: Path,
+                       now: Optional[datetime] = None) -> Optional[SessionContext]:
+    """Best-effort SessionContext for a Codex CLI session log.
+
+    The Codex rollout format is undocumented and may change, so activity is
+    judged purely by mtime: a file still being appended to (younger than
+    CODEX_ACTIVE_S) means "working", a recently quiet one "waiting", an old
+    one None. The task line is fished out of the tail defensively; when
+    nothing safely user-prompt-like is found, task stays "" — that is fine,
+    never an error. No exceptions escape.
+    """
+    if path is None:
+        return None
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    now_ts = (now or datetime.now(timezone.utc)).timestamp()
+    age = now_ts - mtime
+    if age > ACTIVITY_IDLE_S:
+        return None
+    kind = "working" if age < CODEX_ACTIVE_S else "waiting"
+
+    task = ""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - 32768))
+            tail = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        tail = ""
+    for line in reversed(tail.splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue                      # first line may be cut by the seek
+        if not isinstance(rec, dict):
+            continue
+        txt = _codex_user_text(rec)
+        if txt:
+            task = txt[:160]
+            break
+    return SessionContext(kind=kind, tool=None, task=task, project="Codex CLI")

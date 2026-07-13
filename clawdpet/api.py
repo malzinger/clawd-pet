@@ -1,11 +1,20 @@
-"""Live usage via the Anthropic OAuth API — read-only, best effort."""
+"""Live usage via the Anthropic OAuth API.
+
+Token sources, in order: Clawd's OWN independent grant (~/.clawd/auth.json,
+auto-refreshed — rotating it can never affect Claude Code's login), then the
+token Claude Code stored (READ-ONLY), then the calibrated local estimate."""
+import base64
+import hashlib
 import json
 import os
+import secrets
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from .config import (
@@ -13,7 +22,11 @@ from .config import (
     API_OK_INTERVAL_S,
     API_RETRY_S,
     API_STALE_S,
+    CLAWD_AUTH_FILE,
     CREDENTIALS_FILE,
+    OAUTH_CLIENT_ID,
+    OAUTH_TOKEN_URL,
+    REFRESH_COOLDOWN_S,
     USAGE_URL,
     USE_API_USAGE,
 )
@@ -44,17 +57,90 @@ def bucket_label(key: str) -> str:
     return key.replace("_", " ").title()
 
 
-def _get_access_token() -> Optional[str]:
-    """The OAuth token Claude Code stored, but only while it is still valid.
+_clawd_refresh_ts = 0.0            # throttles own-token refresh attempts (module-global)
 
-    READ-ONLY on purpose: Clawd never refreshes the token and never writes the
-    credential store. Anthropic rotates the refresh token on every use, so a
-    passive monitor that refreshed it could consume a rotation it fails to
-    persist (a contended file write, or a network timeout after the server
-    already rotated) and lock the user out of Claude Code itself. When the token
-    is expired we return None and fall back to the local, calibrated estimate."""
+
+def _store_clawd_auth(auth: dict, path: Path = CLAWD_AUTH_FILE) -> bool:
+    """Atomically write Clawd's own token file, tightened to owner-only perms."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(auth), encoding="utf-8")
+        os.replace(str(tmp), str(path))
+        try:
+            os.chmod(str(path), 0o600)   # no-op-ish on Windows, protects POSIX
+        except OSError:
+            pass
+        return True
+    except OSError:
+        return False
+
+
+def _refresh_clawd_token(auth: dict, path: Path = CLAWD_AUTH_FILE) -> Optional[str]:
+    """Refresh Clawd's OWN independent token (~/.clawd/auth.json) and write it
+    back. Safe to write: this grant is separate from Claude Code's login, so a
+    failed refresh only ever drops Clawd back to the read-only/estimate path —
+    it can never lock the user out of Claude Code. Throttled; returns the new
+    access token or None on any failure."""
+    global _clawd_refresh_ts
+    now = time.time()
+    if now - _clawd_refresh_ts < REFRESH_COOLDOWN_S:
+        return None
+    _clawd_refresh_ts = now
+    refresh = auth.get("refresh_token")
+    if not refresh:
+        return None
+    body = json.dumps({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh,
+        "client_id": OAUTH_CLIENT_ID,
+    }).encode("utf-8")
+    req = urllib.request.Request(OAUTH_TOKEN_URL, data=body, method="POST", headers={
+        "Content-Type": "application/json",
+        "User-Agent": "ClawdPet/1.0",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.load(resp)
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    new_at = data.get("access_token")
+    if not new_at:
+        return None
+    auth["access_token"] = new_at
+    if data.get("refresh_token"):
+        auth["refresh_token"] = data["refresh_token"]
+    exp_in = data.get("expires_in")
+    if isinstance(exp_in, (int, float)) and exp_in > 0:
+        auth["expires_at"] = int(time.time() * 1000 + exp_in * 1000)
+    _store_clawd_auth(auth, path)                  # best-effort; own file, low stakes
+    return new_at
+
+
+def _clawd_own_token(path: Path = CLAWD_AUTH_FILE) -> Optional[str]:
+    """Clawd's own independent access token, refreshing it if it has expired."""
+    try:
+        auth = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    token = auth.get("access_token")
+    expires_ms = auth.get("expires_at") or 0
+    if token and time.time() * 1000 < expires_ms - 60_000:
+        return token
+    return _refresh_clawd_token(auth, path)   # expired — safe self-refresh of our own token
+
+
+def _get_access_token() -> Optional[str]:
+    """Prefer Clawd's own independent token (auto-refreshed); otherwise fall back
+    to the token Claude Code stored, READ-ONLY (never refreshed or written, so a
+    rotation we could not persist can never lock the user out of Claude Code)."""
     if os.environ.get("CLAWD_NO_API"):
         return None
+    own = _clawd_own_token()
+    if own:
+        return own
     try:
         creds = json.loads(CREDENTIALS_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -64,7 +150,58 @@ def _get_access_token() -> Optional[str]:
     expires_ms = oauth.get("expiresAt") or 0
     if token and time.time() * 1000 < expires_ms - 60_000:
         return token
-    return None                   # expired — fall back to the log estimate
+    return None                   # both expired — fall back to the log estimate
+
+
+def clawd_build_authorize_url():
+    """Build a fresh PKCE authorize URL for Clawd's own login.
+    Returns (url, code_verifier, redirect_uri)."""
+    redirect = "https://console.anthropic.com/oauth/code/callback"
+    verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    state = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
+    params = {
+        "code": "true", "client_id": OAUTH_CLIENT_ID, "response_type": "code",
+        "redirect_uri": redirect, "scope": "user:profile user:inference",
+        "code_challenge": challenge, "code_challenge_method": "S256", "state": state,
+    }
+    return ("https://platform.claude.com/oauth/authorize?"
+            + urllib.parse.urlencode(params), verifier, redirect)
+
+
+def clawd_exchange_code(raw_code: str, verifier: str, redirect_uri: str) -> None:
+    """Exchange the pasted authorization code (``code#state``) for Clawd's own
+    token and store it in ~/.clawd/auth.json. Raises on failure."""
+    raw = raw_code.strip()
+    code, _, state = raw.partition("#")
+    body = json.dumps({
+        "grant_type": "authorization_code", "code": code, "state": state,
+        "code_verifier": verifier, "client_id": OAUTH_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+    }).encode("utf-8")
+    req = urllib.request.Request(OAUTH_TOKEN_URL, data=body, method="POST", headers={
+        "Content-Type": "application/json", "User-Agent": "ClawdPet/1.0"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        data = json.load(resp)
+    at = (data or {}).get("access_token")
+    if not at:
+        raise ValueError("no access_token in response")
+    exp_in = data.get("expires_in") or 0
+    auth = {
+        "access_token": at,
+        "refresh_token": data.get("refresh_token"),
+        "expires_at": int(time.time() * 1000 + exp_in * 1000),
+        "scope": data.get("scope"),
+    }
+    if not _store_clawd_auth(auth):
+        raise OSError("could not write " + str(CLAWD_AUTH_FILE))
+
+
+def force_live_refetch() -> None:
+    """Drop the poll throttle so the next scan hits the usage endpoint at once
+    (used right after a successful Clawd login)."""
+    _api_cache["next"] = 0.0
 
 
 def fetch_api_usage() -> Optional[list]:

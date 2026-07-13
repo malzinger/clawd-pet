@@ -944,8 +944,60 @@ def run_selftest() -> int:
     acts = [a.text() for a in menu.actions() if a.text()]
     assert len(acts) >= 8, f"tray menu suspiciously small: {acts}"
     assert any(tr("menu_size") in a for a in acts), "size submenu missing"
+    assert tr("menu_clawd_login") in acts, "Clawd login entry missing"
+    assert tr("menu_sound_test") in acts, "sound test entry missing"
     menu.deleteLater()
     print("[selftest] tray menu build OK")
+
+    # --- v1.8 port: Clawd's own login (token store + PKCE url builder) ---
+    from . import api as api_mod
+    from .api import (_clawd_own_token, _store_clawd_auth,
+                      clawd_build_authorize_url)
+    from .config import OAUTH_CLIENT_ID
+    url, verifier, redirect = clawd_build_authorize_url()
+    assert url.startswith("https://platform.claude.com/oauth/authorize?")
+    assert OAUTH_CLIENT_ID in url and "code_challenge=" in url and "state=" in url
+    assert len(verifier) >= 40 and redirect.startswith("https://console.anthropic.com/")
+    url2 = clawd_build_authorize_url()[0]
+    assert url != url2, "authorize url must use fresh PKCE material"
+    with tempfile.TemporaryDirectory() as td:
+        af = Path(td) / "auth.json"
+        good = {"access_token": "tok-live",
+                "expires_at": int(time.time() * 1000 + 3600_000)}
+        assert _store_clawd_auth(good, af) is True and af.is_file()
+        if os.name == "posix":
+            assert (af.stat().st_mode & 0o777) == 0o600, "auth file not 0600"
+        assert _clawd_own_token(af) == "tok-live"        # valid -> returned as-is
+        # expired without a refresh token: throttle is armed, no network happens
+        api_mod._clawd_refresh_ts = 0.0
+        _store_clawd_auth({"access_token": "tok-old", "expires_at": 1}, af)
+        assert _clawd_own_token(af) is None
+        assert api_mod._clawd_refresh_ts > 0.0, "refresh throttle not armed"
+        assert _clawd_own_token(af) is None              # inside cooldown -> fast None
+        api_mod._clawd_refresh_ts = 0.0                  # restore module state
+        assert _clawd_own_token(Path(td) / "missing.json") is None
+    # CLAWD_NO_API guard still short-circuits the whole chain (when set)
+    if os.environ.get("CLAWD_NO_API"):
+        from .api import _get_access_token
+        assert _get_access_token() is None
+    capp.test_sound()                                    # must not raise offscreen
+    print("[selftest] clawd own login OK")
+
+    # --- wander walk animation: the carry gif plays while strolling ------
+    if "carry" in pet._sprites.sprites:
+        pet.set_pct(10)
+        pet.set_activity(None)
+        pet._idle_variant = None
+        pet.enable_wander(True)
+        pet._wander_state = "walk"
+        pet._update_mood()
+        assert pet.mood == "carry", "walking gait not applied while wandering"
+        pet._wander_state = "pause"
+        pet._update_mood()
+        assert pet.mood == "chill", "gait kept after the walk ended"
+        pet.enable_wander(False)
+        assert pet.mood == "chill"
+        print("[selftest] wander walk animation OK")
 
     print("[selftest] OK")
     del app

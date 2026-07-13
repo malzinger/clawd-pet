@@ -175,6 +175,16 @@ STRINGS = {
         "sprites_invalid_title": "Kein Sprite-Pack",
         "sprites_invalid_text": "Der Ordner enthält keine bekannten "
                                 "Clawd-GIFs\n(z. B. clawd-idle.gif).",
+        # --- Clawd's own login (v1.8 upstream port) ---
+        "menu_clawd_login": "Clawd-Login einrichten …",
+        "clawd_login_title": "Clawd-Login",
+        "clawd_login_prompt": "1. Im Browser einloggen und „Authorize“ klicken.\n"
+                              "2. Den angezeigten Code (xxx#yyy) hier einfügen:",
+        "clawd_login_ok": "Clawd-Login eingerichtet — Live-Werte sind aktiv.",
+        "clawd_login_fail": "Login fehlgeschlagen: {e}",
+        "clawd_login_nocode": "Kein Code eingegeben.",
+        # --- sound test ---
+        "menu_sound_test": "Sound testen",
     },
     "en": {
         "panel_title": "Plan usage limits · {plan}",
@@ -281,6 +291,16 @@ STRINGS = {
         "sprites_invalid_title": "No sprite pack",
         "sprites_invalid_text": "The folder contains no known "
                                 "Clawd GIFs\n(e.g. clawd-idle.gif).",
+        # --- Clawd's own login (v1.8 upstream port) ---
+        "menu_clawd_login": "Set up Clawd login …",
+        "clawd_login_title": "Clawd login",
+        "clawd_login_prompt": "1. Sign in in the browser and click \"Authorize\".\n"
+                              "2. Paste the code shown (xxx#yyy) here:",
+        "clawd_login_ok": "Clawd login set up — live values are active.",
+        "clawd_login_fail": "Login failed: {e}",
+        "clawd_login_nocode": "No code entered.",
+        # --- sound test ---
+        "menu_sound_test": "Test sound",
     },
 }
 

@@ -82,17 +82,24 @@ HOOK_EVENTS = ["PreToolUse", "Notification", "Stop", "SessionStart"]
 # the pet drops datagrams that lack it (see hooks.ensure_hook_token).
 HOOK_TOKEN_FILE = Path.home() / ".clawd" / "hook_token"
 
-# --- Optional live sync with the Anthropic usage endpoint -------------------
-# READ-ONLY, best effort: if ~/.claude/.credentials.json holds a *currently
-# valid* OAuth token that Claude Code stored, the exact utilization percentages
-# Claude's own /usage popup shows are fetched. Clawd never refreshes the token
-# and never writes the credential store — a passive monitor must not touch the
-# rotating login token Claude Code owns, or a failed write-back could lock the
-# user out of Claude Code. When the token is expired the local log estimate is
-# used; the last live reading is remembered as a calibration so it stays close.
+# --- Live sync with the Anthropic usage endpoint ----------------------------
+# Two token sources, in order of preference:
+#  1. Clawd's OWN independent OAuth token in ~/.clawd/auth.json (set up via the
+#     one-time login, "Clawd-Login einrichten"). This is a separate grant — like
+#     a third device — so Clawd may auto-refresh it freely: rotating it only ever
+#     affects this file and can never lock the user out of Claude Code.
+#  2. Fallback: the token Claude Code itself stored in ~/.claude/.credentials.json,
+#     READ-ONLY. Clawd never refreshes or writes that shared file, because a
+#     failed write-back of Claude Code's rotating token could break its login.
+# If neither token is valid, the local log estimate is used; the last live
+# reading is remembered as a calibration so the estimate stays close.
 USE_API_USAGE = True
 CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
+CLAWD_AUTH_FILE = Path.home() / ".clawd" / "auth.json"     # Clawd's own token (writable)
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"   # Claude Code's public client id
+REFRESH_COOLDOWN_S = 300.0         # don't retry a failing own-token refresh more than every 5 min
 API_OK_INTERVAL_S = 30.0           # hit the usage endpoint at most this often when healthy
 API_RETRY_S = 5.0                  # base back-off after a failed usage fetch
 API_MAX_BACKOFF_S = 120.0          # cap the exponential back-off on repeated failures
@@ -100,7 +107,7 @@ API_STALE_S = 180.0                # keep showing the last live % up to this lon
 
 ORG_NAME = "ClawdPet"
 APP_NAME = "Clawd"
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.8.0"
 
 # --- Burn-rate forecast + threshold notifications ----------------------------
 BURN_LOOKBACK_S = 3600      # forecast fits over at most the last hour

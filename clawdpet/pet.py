@@ -226,7 +226,12 @@ class PetWidget(QWidget):
             elif kind == "error":
                 mood = "panic"
         if mood == "chill":
-            if self._idle_variant:
+            if (self._wander_enabled and self._wander_state == "walk"
+                    and "carry" in self._sprites.sprites):
+                # walking gait while wandering (F5): the carrying gif is the
+                # only one with a walk cycle — Clawd strolls with his box
+                mood = "carry"
+            elif self._idle_variant:
                 mood = self._idle_variant          # play the random idle flourish
         else:
             self._idle_variant = None              # left idle -> don't resume a stale one
@@ -499,6 +504,7 @@ class PetWidget(QWidget):
             if self._wander_facing != 1:
                 self._wander_facing = 1      # back to the GIFs' native facing
                 self.update()
+        self._update_mood()                  # enter/leave the walking gait
 
     def _wander_blocked(self) -> bool:
         """No autonomous movement while the user or Claude interacts."""
@@ -518,6 +524,7 @@ class PetWidget(QWidget):
                 self._wander_state = "pause"
                 if self.owner:
                     self.owner.save_position()
+                self._update_mood()          # drop the walking gait
             # keep pushing the deadline so a fresh pause starts once free
             self._wander_until = now + random.uniform(*WANDER_PAUSE_RANGE_S)
             return
@@ -532,6 +539,7 @@ class PetWidget(QWidget):
                 self._wander_dir = random.choice((-1, 1))
                 self._wander_carry = 0.0
                 self._wander_until = now + random.uniform(*WANDER_WALK_RANGE_S)
+            self._update_mood()              # walking gait on/off (carry gif)
             return
         if self._wander_state != "walk":
             return

@@ -62,6 +62,7 @@ from .config import (
 )
 from .focus import focus_terminal
 from .history import HistoryStore
+from .macdock import hide_dock_icon
 from .hooks import (
     ensure_hook_token,
     hook_command,
@@ -956,6 +957,7 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)   # lives in the tray
+    hide_dock_icon()   # macOS: menu-bar (tray) app only — no Dock, no Cmd-Tab
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(ORG_NAME)
     app.setWindowIcon(make_app_icon())

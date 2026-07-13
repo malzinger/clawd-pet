@@ -19,6 +19,27 @@ from .config import CLAUDE_SETTINGS_FILE, HOOK_EVENTS, HOOK_TOKEN_FILE
 #   ~/.claude/settings.json and is only touched from the tray menu.)
 # ======================================================================
 
+def _hook_runner() -> Optional[str]:
+    """Interpreter for the hook scripts.
+
+    Running from source, the interpreter that runs the pet is the one that
+    is guaranteed to exist — macOS PATHs often have no plain "python", only
+    "python3" (or nothing, inside a venv). Only a frozen exe has to search
+    the PATH for a system Python."""
+    if not getattr(sys, "frozen", False) and sys.executable:
+        exe = Path(sys.executable)
+        if sys.platform == "win32":              # avoid console flashes
+            pyw = exe.with_name("pythonw.exe")
+            if pyw.is_file():
+                return str(pyw)
+        return str(exe)
+    for name in ("pythonw", "pyw", "python3", "python", "py"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
 def hook_command(script: str = "clawd_hook.py") -> Optional[str]:
     """Command line for a Claude Code hook script, or None if unavailable."""
     if getattr(sys, "frozen", False):
@@ -35,8 +56,7 @@ def hook_command(script: str = "clawd_hook.py") -> Optional[str]:
         hook_py = Path(__file__).resolve().parent.parent / script
         if not hook_py.is_file():
             return None
-    runner = (shutil.which("pythonw") or shutil.which("pyw")
-              or shutil.which("python") or shutil.which("py"))
+    runner = _hook_runner()
     if not runner:
         return None
     return f'"{runner}" "{hook_py}"'

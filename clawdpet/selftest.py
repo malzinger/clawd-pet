@@ -1127,6 +1127,20 @@ def run_selftest() -> int:
     assert TERMINAL_APPS and TERMINAL_APPS[0] == "Warp"
     print("[selftest] dnd + focus OK")
 
+    # --- hook runner resolution: must work without any python on PATH -----
+    # (running from source, the pet's own interpreter is used — macOS often
+    # ships no plain "python"; this regressed for real users before)
+    from .hooks import _hook_runner, hook_command
+    runner = _hook_runner()
+    assert runner and Path(runner).is_file(), f"no hook runner: {runner!r}"
+    cmd = hook_command()
+    assert cmd and "clawd_hook.py" in cmd, f"activity hook cmd: {cmd!r}"
+    pcmd = hook_command("clawd_permission_hook.py")
+    assert pcmd and "clawd_permission_hook.py" in pcmd
+    from .macdock import hide_dock_icon
+    assert callable(hide_dock_icon)     # not invoked: offscreen has no Dock
+    print("[selftest] hook runner + macdock OK")
+
     print("[selftest] OK")
     del app
     return 0

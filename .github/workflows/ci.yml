@@ -31,7 +31,7 @@ jobs:
       - name: Lint (pyflakes)
         # the clawd_pet.py shim re-exports the public API on purpose, so it
         # is excluded from the unused-import check
-        run: python -m pyflakes clawdpet clawd_hook.py make_website_assets.py
+        run: python -m pyflakes clawdpet clawd_hook.py make_website_assets.py tools
 
       - name: Selftest (headless)
         env:

@@ -35,7 +35,7 @@ Die eigenständige exe selbst bauen:
 
 ```bash
 pip install pyinstaller
-python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ico" --add-data "sprites;sprites" --add-data "clawd_hook.py;." clawd_pet.py
+python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ico" --add-data "sprites;sprites" --add-data "sounds;sounds" --add-data "clawd_hook.py;." clawd_pet.py
 ```
 
 ## Code-Aufbau
@@ -55,6 +55,8 @@ Paket `clawdpet/` — grob: `usage` (Log-Scan, 5-h-Fenster, Kalibrierung),
 | 50 – 80 %       | Werkelt    | hämmert fleißig mit Bauhelm         |
 | 80 – 100 %      | Panik      | hektisches Debugging                |
 | ≥ 100 %         | Limit      | auf dem Rücken, X-Augen, ERROR      |
+
+![Clawds Stimmungen](docs/moods_preview.png)
 
 ## Was es macht
 
@@ -114,7 +116,23 @@ Paket `clawdpet/` — grob: `usage` (Log-Scan, 5-h-Fenster, Kalibrierung),
   Die Events sind mit einem lokalen Token (`~/.clawd/hook_token`)
   authentifiziert, damit kein anderer Prozess auf dem Rechner sie fälschen
   kann.
-- **Streicheln:** Doppelklick auf Clawd lässt Herzchen aufsteigen.
+- **Streicheln:** Doppelklick auf Clawd lässt Herzchen aufsteigen. Pack ihn
+  und schleudere ihn — er fliegt im Bogen, prallt an den Bildschirmkanten ab
+  und landet wieder auf den Füßen. Schleicht sich der Mauszeiger an den
+  schlafenden Clawd heran, schreckt er kurz hoch. Delegiert Claude an
+  Subagenten (Task/Agent-Tools), jongliert Clawd.
+- **Herumlaufen (opt-in):** Ein Tray-Schalter lässt Clawd im Leerlauf über
+  den Bildschirm spazieren — an den Kanten dreht er um, bei Hover, Drag oder
+  sobald Claude arbeitet, bleibt er stehen.
+- **Auch Codex CLI:** Wer zusätzlich OpenAIs Codex CLI nutzt, sieht Clawd
+  auch auf dessen Sessions reagieren (`~/.codex/sessions`) — Claude-Sessions
+  haben immer Vorrang.
+- **Kosten-Schätzung & Projekt-Split:** Das Panel zeigt den ungefähren
+  API-Gegenwert des aktuellen Fensters/der Woche und welche Projekte die
+  meisten Tokens verbrauchen (Top 3).
+- **Mach ihn zu deinem:** Tray-Menü mit drei Größen (S/M/L), optionalen
+  Benachrichtigungs-Sounds (mit System-Beep-Fallback), Klick-Durchlässigkeit
+  und eigenen Sprite-Packs — einfach einen Ordner mit kompatiblen GIFs wählen.
 - **Zweisprachig:** Die komplette Oberfläche (Panel, Sprechblasen, Menüs,
   Dialoge, Zahlenformate) schaltet zwischen Deutsch und Englisch um —
   Tray-Menü → „Language/Sprache".

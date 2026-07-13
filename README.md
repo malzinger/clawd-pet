@@ -34,7 +34,7 @@ Build the standalone exe yourself:
 
 ```bash
 pip install pyinstaller
-python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ico" --add-data "sprites;sprites" --add-data "clawd_hook.py;." clawd_pet.py
+python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ico" --add-data "sprites;sprites" --add-data "sounds;sounds" --add-data "clawd_hook.py;." clawd_pet.py
 ```
 
 ## Code layout
@@ -54,6 +54,8 @@ calibration), `api` (read-only live sync), `activity`/`hooks` (real time),
 | 50 – 80 %       | Working  | hammering away with a hard hat   |
 | 80 – 100 %      | Panic    | frantic debugging                |
 | ≥ 100 %         | Limit    | flat on his back, X eyes, ERROR  |
+
+![Clawd's moods](docs/moods_preview.png)
 
 ## What it does
 
@@ -109,7 +111,23 @@ calibration), `api` (read-only live sync), `activity`/`hooks` (real time),
   `settings.json` is kept and the entry can be removed from the same menu.
   Events are authenticated with a local token (`~/.clawd/hook_token`), so no
   other process on the machine can spoof them.
-- **Pet him:** double-click Clawd and hearts float up.
+- **Pet him:** double-click Clawd and hearts float up. Grab him and fling
+  him — he flies in an arc, bounces off the screen edges and lands back on
+  his feet. Sneak your cursor up on him while he sleeps and he wakes with a
+  startled hop. When Claude delegates to subagents (Task/Agent tools), Clawd
+  juggles.
+- **Wander mode (opt-in):** a tray toggle lets Clawd stroll across the
+  screen while idle — he turns around at the edges and pauses when you
+  hover, drag or Claude starts working.
+- **Codex CLI too:** if you also use OpenAI's Codex CLI, Clawd notices its
+  sessions (`~/.codex/sessions`) and animates along — Claude sessions always
+  take precedence.
+- **Cost estimate & project split:** the panel shows the approximate
+  pay-as-you-go API value of your current window/week and which projects
+  burn the most tokens (top 3).
+- **Make him yours:** tray menu offers three sizes (S/M/L), optional
+  notification chimes (with system-beep fallback), click-through mode, and
+  custom sprite packs — point Clawd at any folder with compatible GIFs.
 - **Bilingual UI:** the whole app (panel, bubbles, menus, dialogs, number
   formats) switches between English and German — tray menu → "Sprache/Language".
 - Drag him anywhere; the position is remembered. Tray icon with manual

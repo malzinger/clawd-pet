@@ -290,8 +290,11 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
         snap.error = tr("err_logs", e=exc)
         return snap
 
+    seen_keys = set()          # cache keys touched by this pass (for pruning)
+    stopped = False
     for fp in files:
         if should_stop is not None and should_stop():
+            stopped = True
             break   # app is quitting — a partial snapshot is fine
         try:
             mtime = datetime.fromtimestamp(fp.stat().st_mtime, tz=timezone.utc)
@@ -303,6 +306,7 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
             newest_mtime = mtime
             snap.newest_file = str(fp)
         snap.files_scanned += 1
+        seen_keys.add(str(fp))
         for entry in _parse_file_entries(fp):
             ts = entry[4]
             if ts < horizon or ts > now + timedelta(minutes=5):
@@ -314,6 +318,12 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
                     by_msg_id[mid] = entry
             else:
                 anonymous.append(entry)
+
+    if not stopped:
+        # drop cache entries of files that aged out of the replay horizon —
+        # a 24/7 tray app must not accumulate every session log it ever parsed
+        for key in [k for k in _FILE_CACHE if k not in seen_keys]:
+            del _FILE_CACHE[key]
 
     all_entries = list(by_msg_id.values()) + anonymous
     chain_ts = sorted(e[4] for e in all_entries if e[4] >= chain_cutoff)

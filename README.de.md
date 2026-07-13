@@ -38,6 +38,14 @@ pip install pyinstaller
 python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ico" --add-data "sprites;sprites" --add-data "clawd_hook.py;." clawd_pet.py
 ```
 
+## Code-Aufbau
+
+`clawd_pet.py` ist nur der Einstiegspunkt; die Implementierung liegt im
+Paket `clawdpet/` — grob: `usage` (Log-Scan, 5-h-Fenster, Kalibrierung),
+`api` (Read-only-Live-Sync), `activity`/`hooks` (Echtzeit), `art`/`pet`/
+`panel`/`bubble` (Qt-Oberfläche), `app` (Controller + Tray) und `selftest`
+(Headless-Smoke-Test, läuft auch in der CI).
+
 ## Clawds Stimmungen
 
 | Auslastung      | Stimmung   | Was du siehst                       |
@@ -93,8 +101,8 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
 - **Update-Prüfung:** Beim Start (und alle 6 Std.) fragt Clawd bei GitHub
   nach, ob eine neuere Version existiert, und zeigt bei Bedarf eine Sprechblase
   zum Herunterladen. Im Tray-Menü abschaltbar.
-- **Mit Windows starten:** Ein Häkchen im Tray-Menü registriert oder
-  entfernt den Autostart (nur Windows).
+- **Beim Anmelden starten:** Ein Häkchen im Tray-Menü registriert oder
+  entfernt den Autostart (Windows-Run-Key bzw. macOS-LaunchAgent).
 - **Reagiert in Echtzeit:** Ein leichtgewichtiger Watcher verfolgt das neueste
   Session-Log — Clawd hämmert, während Claude Tools ausführt, freut sich, wenn
   der Turn fertig ist, und Sprechblasen verraten, was gerade passiert („führt
@@ -103,6 +111,9 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
   registriert Claude-Code-Hooks für Sofort-Reaktionen — inklusive „Claude
   wartet auf deine Eingabe". Benötigt Python im PATH; von `settings.json`
   wird ein `.clawd-bak`-Backup angelegt, Deaktivieren geht im selben Menü.
+  Die Events sind mit einem lokalen Token (`~/.clawd/hook_token`)
+  authentifiziert, damit kein anderer Prozess auf dem Rechner sie fälschen
+  kann.
 - **Streicheln:** Doppelklick auf Clawd lässt Herzchen aufsteigen.
 - **Zweisprachig:** Die komplette Oberfläche (Panel, Sprechblasen, Menüs,
   Dialoge, Zahlenformate) schaltet zwischen Deutsch und Englisch um —

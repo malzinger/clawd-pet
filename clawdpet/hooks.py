@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from .config import HOOK_EVENTS, HOOK_TOKEN_FILE
+from .config import CLAUDE_SETTINGS_FILE, HOOK_EVENTS, HOOK_TOKEN_FILE
 
 # ======================================================================
 #  Real-time activity — Stufe 2: opt-in Claude Code hooks
@@ -152,3 +152,24 @@ def parse_hook_datagram(data: bytes, token: str) -> Optional[dict]:
     except ValueError:
         return None
     return event if isinstance(event, dict) else None
+
+
+def refresh_hook_copy() -> None:
+    """Keep the copied hook sender in sync with the running exe (frozen only).
+
+    In frozen mode enable_hooks() copies clawd_hook.py to ~/.claude; after an
+    app update that copy would lag behind (e.g. predate the datagram token and
+    get silently dropped by the receiver). While hooks are registered, refresh
+    the copy from the bundle on every startup. In source mode the script lives
+    in the repo and updates together with the app — nothing to do."""
+    if not getattr(sys, "frozen", False):
+        return
+    if not hooks_registered(CLAUDE_SETTINGS_FILE):
+        return
+    src = Path(getattr(sys, "_MEIPASS", "")) / "clawd_hook.py"
+    dst = Path.home() / ".claude" / "clawd_hook.py"
+    try:
+        if src.is_file():
+            shutil.copy2(src, dst)
+    except OSError:
+        pass                       # best effort — the log watcher still works

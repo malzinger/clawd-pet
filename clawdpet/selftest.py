@@ -44,6 +44,7 @@ from .panel import PanelWidget
 from .pet import PetWidget
 from .update import is_trusted_update_url, parse_version, version_is_newer
 from .usage import (
+    _FILE_CACHE,
     UsageSnapshot,
     _current_window_start,
     _weekly_window,
@@ -61,6 +62,11 @@ from .usage import (
 def run_selftest() -> int:
     """Headless smoke test: scan logs, render every mood, build the panel."""
     app = QApplication(sys.argv)
+
+    # a machine without Claude Code (e.g. CI) has no log directory yet; an
+    # empty one makes the scan return a clean zero snapshot instead of an
+    # error, so the log-mode panel assertions below hold everywhere
+    CLAUDE_PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 
     snap = scan_usage()
     print(f"[selftest] dir={CLAUDE_PROJECTS_DIR}")
@@ -366,6 +372,21 @@ def run_selftest() -> int:
         assert isinstance(autostart_enabled(), bool)
     print("[selftest] autostart OK")
 
+    # macOS autostart: LaunchAgent plist round-trip against a scratch path
+    if sys.platform == "darwin":
+        import plistlib
+        from .autostart import _autostart_args, _set_autostart_darwin
+        with tempfile.TemporaryDirectory() as td:
+            pl = Path(td) / "com.clawdpet.clawd.plist"
+            assert _autostart_args(), "no launch args found"
+            assert _set_autostart_darwin(True, pl) and pl.is_file()
+            data = plistlib.loads(pl.read_bytes())
+            assert data["RunAtLoad"] is True and data["ProgramArguments"]
+            assert data["ProgramArguments"][-1].endswith("clawd_pet.py")
+            assert _set_autostart_darwin(False, pl) and not pl.exists()
+            assert _set_autostart_darwin(False, pl), "double-disable failed"
+        print("[selftest] macOS autostart plist OK")
+
     # update check: version parsing and strict-newer comparison
     assert parse_version("v1.2.0") == (1, 2, 0)
     assert parse_version("1.10") == (1, 10)
@@ -539,6 +560,13 @@ def run_selftest() -> int:
         assert parse_hook_datagram(b"", tok) is None
     assert capp._hook_token and len(capp._hook_token) >= 32
     print("[selftest] hook datagram auth OK")
+
+    # file-cache pruning: entries of files outside the horizon are dropped
+    _FILE_CACHE["/nonexistent/stale-session.jsonl"] = (0, 0, [])
+    scan_usage()
+    assert "/nonexistent/stale-session.jsonl" not in _FILE_CACHE, \
+        "stale file-cache entry survived a full scan"
+    print("[selftest] file-cache pruning OK")
 
     # update URLs: only this repo's release pages are ever opened
     assert is_trusted_update_url(

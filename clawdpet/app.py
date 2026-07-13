@@ -55,6 +55,7 @@ from .hooks import (
     hook_command,
     hooks_registered,
     parse_hook_datagram,
+    refresh_hook_copy,
     register_hooks,
     unregister_hooks,
 )
@@ -197,6 +198,7 @@ class ClawdApp:
     # -------------------------------------------------- lifecycle
 
     def start(self):
+        refresh_hook_copy()   # frozen exe: keep ~/.claude/clawd_hook.py current
         self.pet.show()
         self._scan_timer.start()
         self._activity_timer.start()

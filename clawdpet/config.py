@@ -139,3 +139,10 @@ HISTORY_GAP_S = 1800              # break the line across gaps longer than this
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 CODEX_ACTIVE_S = 20
 
+# --- cost estimate (F4) ---
+# Public API price for Sonnet input, USD per million tokens. The cost-weighted
+# usage sum (WEIGHT_* x MODEL_COST) is expressed in Sonnet-input-token
+# equivalents, so weighted units x this price = the approximate API price the
+# same usage would have cost on pay-as-you-go.
+SONNET_INPUT_USD_PER_MTOK = 3.0
+

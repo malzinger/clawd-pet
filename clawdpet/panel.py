@@ -25,7 +25,12 @@ from PyQt5.QtWidgets import (
 
 from .api import _fmt_reset
 from .art import make_clawd_pixmap, sprite_pixmap
-from .config import PANEL_WIDTH, PLAN_NAME, WINDOW_HOURS
+from .config import (
+    PANEL_WIDTH,
+    PLAN_NAME,
+    SONNET_INPUT_USD_PER_MTOK,
+    WINDOW_HOURS,
+)
 from .history import HistoryChart
 from .i18n import _fmt_dur, fmt_de, fmt_pct_de, tool_action, tr
 from .moods import MOOD_COLORS, mood_for_pct
@@ -156,6 +161,14 @@ class PanelWidget(QWidget):
         self.detail_label.setObjectName("sub")
         self.detail_label.setWordWrap(True)
         lay.addWidget(self.detail_label)
+        self.cost_label = QLabel("")
+        self.cost_label.setObjectName("sub")
+        self.cost_label.setWordWrap(True)
+        lay.addWidget(self.cost_label)
+        self.projects_label = QLabel("")
+        self.projects_label.setObjectName("sub")
+        self.projects_label.setWordWrap(True)
+        lay.addWidget(self.projects_label)
         self.forecast_label = QLabel("")
         self.forecast_label.setObjectName("sub")
         self.forecast_label.setWordWrap(True)
@@ -236,6 +249,8 @@ class PanelWidget(QWidget):
         self._title.setText(tr("panel_title", plan=PLAN_NAME))
         self.history_title.setText(tr("history_title"))
         self.task_title.setText(tr("task_title"))
+        if self._snap is not None:    # re-render the cost/project lines in the
+            self._update_extras(self._snap)   # new language right away
         self.set_task(self._task_ctx, self._work_since)
 
     def set_history(self, series):
@@ -386,6 +401,7 @@ class PanelWidget(QWidget):
             self.detail_label.setText(
                 tr("detail_used", n=fmt_de(snap.total), hint=hint))
         self.detail_label.setVisible(bool(self.detail_label.text()))
+        self._update_extras(snap)
         self._update_forecast(snap)
         self.history_chart.set_series(self._history)
         self.history_title.setVisible(len(self._history) >= 2)
@@ -395,6 +411,32 @@ class PanelWidget(QWidget):
                 tr("updated", t=snap.updated_at.strftime("%H:%M:%S"), src=src))
         self._refresh_countdown()
         self._relayout()
+
+    def _update_extras(self, snap: UsageSnapshot):
+        """Cost-equivalent + per-project lines (shown in log AND api mode —
+        the local log counting runs underneath the live sync either way)."""
+        if snap.error or snap.weighted <= 0:
+            self.cost_label.setText("")
+        else:
+            # weighted units are Sonnet-input-token equivalents, so the public
+            # Sonnet input price converts them into an approximate API price.
+            # USD amounts keep the US decimal format in both languages.
+            c5 = f"${snap.weighted / 1e6 * SONNET_INPUT_USD_PER_MTOK:,.2f}"
+            cw = f"${snap.week_weighted / 1e6 * SONNET_INPUT_USD_PER_MTOK:,.2f}"
+            self.cost_label.setText(tr("cost_line", c5=c5, cw=cw))
+        self.cost_label.setVisible(bool(self.cost_label.text()))
+
+        parts = ""
+        if not snap.error and snap.weighted > 0:
+            # top 3 projects by weighted share of the current 5-hour window;
+            # "?" (no cwd found) is noise, not a project — never shown
+            top = sorted(((n, w) for n, w in snap.by_project_weighted.items()
+                          if n != "?" and w > 0), key=lambda kv: -kv[1])[:3]
+            parts = " · ".join(
+                f"{n} {round(w / snap.weighted * 100)}%" for n, w in top)
+        self.projects_label.setText(
+            tr("projects_line", parts=parts) if parts else "")
+        self.projects_label.setVisible(bool(self.projects_label.text()))
 
     def _update_forecast(self, snap: UsageSnapshot):
         """Burn-rate line: projected time of hitting the 5-hour limit."""

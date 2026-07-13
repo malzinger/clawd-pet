@@ -162,6 +162,9 @@ STRINGS = {
         "notify_input_text": "Claude wartet auf deine Eingabe.",
         "menu_sound_on": "Benachrichtigungston aktivieren",
         "menu_sound_off": "Benachrichtigungston deaktivieren",
+        # --- cost estimate + projects (F4/F10) ---
+        "cost_line": "≈ API-Gegenwert: {c5} (5 h) · {cw} (Woche)",
+        "projects_line": "Projekte: {parts}",
     },
     "en": {
         "panel_title": "Plan usage limits · {plan}",
@@ -255,6 +258,9 @@ STRINGS = {
         "notify_input_text": "Claude is waiting for your input.",
         "menu_sound_on": "Enable notification sound",
         "menu_sound_off": "Disable notification sound",
+        # --- cost estimate + projects (F4/F10) ---
+        "cost_line": "≈ API equivalent: {c5} (5 h) · {cw} (week)",
+        "projects_line": "Projects: {parts}",
     },
 }
 

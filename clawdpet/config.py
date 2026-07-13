@@ -128,3 +128,14 @@ HISTORY_KEEP_DAYS = 7              # prune points older than this
 HISTORY_WINDOW_H = 24             # span shown in the panel sparkline
 HISTORY_GAP_S = 1800              # break the line across gaps longer than this
 
+# --- Codex CLI detection (F6) ---------------------------------------------
+# OpenAI Codex CLI writes *.jsonl session logs below ~/.codex/sessions. They
+# are only consulted as a FALLBACK when no Claude session log is active, and
+# activity is judged purely by mtime: the Codex log format is undocumented
+# and may change at any time, so nothing in it is parsed strictly. A file
+# younger than CODEX_ACTIVE_S means Codex is generating right now
+# ("working"); between CODEX_ACTIVE_S and ACTIVITY_IDLE_S it counts as
+# "waiting" (turn finished, session still warm); older logs are ignored.
+CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
+CODEX_ACTIVE_S = 20
+

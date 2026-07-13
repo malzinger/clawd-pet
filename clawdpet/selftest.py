@@ -935,6 +935,18 @@ def run_selftest() -> int:
     assert pet.height() == PET_HEIGHT
     print("[selftest] W3 customization OK")
 
+    # --- release gate: tray menu builds without a tray -------------------
+    # capp runs with with_tray=False, so build_menu() was never exercised and
+    # an attribute read before its initialisation slipped through (pet_size
+    # was set AFTER _setup_tray). Building the menu here catches any such
+    # ordering regression on every future run.
+    menu = capp.build_menu(None)
+    acts = [a.text() for a in menu.actions() if a.text()]
+    assert len(acts) >= 8, f"tray menu suspiciously small: {acts}"
+    assert any(tr("menu_size") in a for a in acts), "size submenu missing"
+    menu.deleteLater()
+    print("[selftest] tray menu build OK")
+
     print("[selftest] OK")
     del app
     return 0

@@ -24,7 +24,11 @@ class SpeechBubble(QWidget):
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self.hide)
-        self.setFont(QFont("Segoe UI", 9))
+        # Segoe UI only exists on Windows; naming a missing family makes Qt
+        # scan every font for aliases (a ~50 ms startup warning on macOS)
+        family = {"win32": "Segoe UI", "darwin": "Helvetica Neue"}.get(
+            sys.platform, "sans-serif")
+        self.setFont(QFont(family, 9))
         self._on_click = None
 
     def show_text(self, text: str, pet: QWidget, duration_ms: int = 4200,

@@ -47,31 +47,42 @@ from .usage import (
 #  Slide-out usage panel
 # ======================================================================
 
-PANEL_QSS = """
-QFrame#card {
+# Segoe UI only exists on Windows, Helvetica Neue always on macOS. Naming a
+# family Qt cannot find (including the generic "sans-serif" in a QSS list)
+# makes it scan every installed font for aliases — a ~50-90 ms startup
+# warning — so each platform gets exactly one family that surely exists.
+if sys.platform == "win32":
+    _FONT_STACK = "'Segoe UI'"
+elif sys.platform == "darwin":
+    _FONT_STACK = "'Helvetica Neue'"
+else:
+    _FONT_STACK = "sans-serif"      # generic resolves fine on Linux/fontconfig
+
+PANEL_QSS = f"""
+QFrame#card {{
     background-color: rgba(38, 37, 35, 250);
     border: 1px solid #3d3b38;
     border-radius: 12px;
-}
-QLabel {
+}}
+QLabel {{
     color: #eceae6;
     background: transparent;
     border: none;
-    font-family: 'Segoe UI', 'Helvetica Neue', sans-serif;
-}
-QLabel#h1       { font-size: 13px; font-weight: 600; }
-QLabel#rowlabel { font-size: 12px; font-weight: 600; }
-QLabel#reset    { font-size: 11px; color: #9b9892; }
-QLabel#pct      { font-size: 12px; font-weight: 700; }
-QLabel#sub      { font-size: 11px; color: #9b9892; }
-QLabel#note     { font-size: 10px; color: #7d7a74; font-style: italic; }
-QProgressBar {
+    font-family: {_FONT_STACK};
+}}
+QLabel#h1       {{ font-size: 13px; font-weight: 600; }}
+QLabel#rowlabel {{ font-size: 12px; font-weight: 600; }}
+QLabel#reset    {{ font-size: 11px; color: #9b9892; }}
+QLabel#pct      {{ font-size: 12px; font-weight: 700; }}
+QLabel#sub      {{ font-size: 11px; color: #9b9892; }}
+QLabel#note     {{ font-size: 10px; color: #7d7a74; font-style: italic; }}
+QProgressBar {{
     background: #3a3833;
     border: none;
     border-radius: 2px;
-}
-QProgressBar::chunk { border-radius: 2px; background: #6879f8; }
-QFrame#divider { background: #3d3b38; border: none; }
+}}
+QProgressBar::chunk {{ border-radius: 2px; background: #6879f8; }}
+QFrame#divider {{ background: #3d3b38; border: none; }}
 """
 
 

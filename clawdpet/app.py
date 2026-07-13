@@ -196,12 +196,9 @@ class ClawdApp:
         self._hide_check.setInterval(400)
         self._hide_check.timeout.connect(self._maybe_hide_panel)
 
-        self.tray: Optional[QSystemTrayIcon] = None
-        self._tray_menu: Optional[QMenu] = None
-        if with_tray and QSystemTrayIcon.isSystemTrayAvailable():
-            self._setup_tray()
-
-        # F2/F13: apply the saved size preset + custom sprite pack (one rebuild)
+        # F2/F13: apply the saved size preset + custom sprite pack (one
+        # rebuild). Must happen BEFORE the tray menu is built — build_menu
+        # reads self.pet_size / self.sprite_dir for the checked entries.
         size_key = str(self.settings.value("pet_size", "M") or "M")
         self.pet_size = size_key if size_key in PET_SIZE_FACTORS else "M"
         self.sprite_dir: Optional[Path] = None
@@ -214,6 +211,11 @@ class ClawdApp:
         if self.pet_size != "M" or self.sprite_dir is not None:
             self.pet.rebuild(height=self._pet_height(),
                              sprite_dir=self.sprite_dir)
+
+        self.tray: Optional[QSystemTrayIcon] = None
+        self._tray_menu: Optional[QMenu] = None
+        if with_tray and QSystemTrayIcon.isSystemTrayAvailable():
+            self._setup_tray()
 
         self._restore_position()
         self.pet.enable_wander(self.wander)          # F5 (opt-in)

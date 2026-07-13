@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 venv/
 .venv/
+.bin/
 
 # macOS
 .DS_Store

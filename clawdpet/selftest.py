@@ -576,6 +576,35 @@ def run_selftest() -> int:
     assert not is_trusted_update_url("")
     print("[selftest] update-url whitelist OK")
 
+    # --- W1-A: pet behavior ---
+    from .moods import MOOD_FALLBACK
+    assert MOOD_FALLBACK["juggle"] == "focus", "juggle should fall back to focus"
+    _w1a_pct, _w1a_activity = pet.pct, pet._activity
+    pet.set_pct(10)
+    if "juggle" in pet._sprites.sprites:
+        pet.set_activity(("working", "Task"))    # delegating -> juggling
+        assert pet.mood == "juggle", "Task should map to juggle"
+        pet.set_activity(("working", "Agent"))
+        assert pet.mood == "juggle", "Agent should map to juggle"
+    pet.set_activity(None)
+    assert pet.mood == "chill"
+    if pet._sprites.sprites:
+        pet._quota_mood = "sleep"                # put Clawd to sleep
+        pet.set_activity(None)
+        pet._update_mood()
+        assert pet.mood == "sleep"
+        assert pet._startle() is True, "hovering should startle sleeping Clawd"
+        assert pet._react_active and pet.mood in ("pet", "happy")
+        assert not pet.grab().isNull(), "startle reaction did not render"
+        assert pet._startle() is False, "startle during reaction must be a no-op"
+        pet._end_reaction()
+        assert pet.mood == "sleep", "startled Clawd should fall back asleep"
+        assert pet._startle() is False, "cooldown should block a re-startle"
+        pet._last_startle = None                 # reset the cooldown stamp
+    pet.set_pct(_w1a_pct)                        # restore pre-block state
+    pet.set_activity(_w1a_activity)
+    print("[selftest] W1-A pet behavior OK")
+
     print("[selftest] OK")
     del app
     return 0

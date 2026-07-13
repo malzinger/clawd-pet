@@ -39,6 +39,7 @@ class PetWidget(QWidget):
     MOOD_FADE_MS = 340         # cross-dissolve a mood change
     HEART_LIFE_MS = 1200       # petting hearts float up and fade this long
     REACT_MS = 1300            # how long the petting reaction animation plays
+    STARTLE_COOLDOWN_S = 30.0  # min. seconds between hover-startles while asleep
 
     def __init__(self, owner: Optional["ClawdApp"] = None):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
@@ -59,6 +60,7 @@ class PetWidget(QWidget):
         self._react_timer.setSingleShot(True)
         self._react_timer.timeout.connect(self._end_reaction)
         self._pet_times = []           # recent petting stamps (spam -> annoyed)
+        self._last_startle = None      # monotonic stamp of the last hover-startle
         self._idle_variant = None      # current random idle flourish, or None
         self._idle_pool = []           # available idle flourishes (filled below)
         self._idle_timer = QTimer(self)
@@ -175,6 +177,28 @@ class PetWidget(QWidget):
         self._react_active = True
         self._set_mood(want)
         self._react_timer.start(self.REACT_MS)
+
+    def _startle(self) -> bool:
+        """A hovering cursor startles the sleeping Clawd: a short jump-up.
+
+        Returns True if the reaction started. Reuses the petting reaction
+        mechanics, so _end_reaction() drops him right back to sleep.
+        """
+        loaded = self._sprites.sprites
+        if not loaded or self._react_active or self.mood != "sleep":
+            return False
+        now = time.monotonic()
+        if (self._last_startle is not None
+                and now - self._last_startle < self.STARTLE_COOLDOWN_S):
+            return False                 # mouse traffic shouldn't keep him awake
+        want = "pet" if "pet" in loaded else "happy"  # double-jump, else cheer
+        if want not in loaded:
+            return False
+        self._last_startle = now
+        self._react_active = True
+        self._set_mood(want)
+        self._react_timer.start(self.REACT_MS)
+        return True
 
     def _end_reaction(self):
         self._react_active = False
@@ -361,6 +385,7 @@ class PetWidget(QWidget):
     def enterEvent(self, event):
         if self.owner:
             self.owner.hover_panel()
+        self._startle()                # approaching a sleeping Clawd wakes him
         super().enterEvent(event)
 
     def leaveEvent(self, event):

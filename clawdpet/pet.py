@@ -7,12 +7,23 @@ from typing import TYPE_CHECKING, Optional
 if TYPE_CHECKING:                      # only for the Optional["ClawdApp"] hint
     from .app import ClawdApp
 
-from PyQt5.QtCore import QElapsedTimer, QRectF, QSize, Qt, QTimer
-from PyQt5.QtGui import QColor, QPainter, QPixmap
+from PyQt5.QtCore import QElapsedTimer, QRect, QRectF, QSize, Qt, QTimer
+from PyQt5.QtGui import QColor, QGuiApplication, QPainter, QPixmap, QRegion
 from PyQt5.QtWidgets import QWidget
 
 from .art import ArtState, ClawdArt, SpriteSet
-from .config import PET_HEIGHT
+from .config import (
+    PET_HEIGHT,
+    THROW_BOUNCE,
+    THROW_FRICTION,
+    THROW_GRAVITY,
+    THROW_MIN_SPEED,
+    THROW_STOP_SPEED,
+    WANDER_PAUSE_RANGE_S,
+    WANDER_SPEED_PX,
+    WANDER_TICK_MS,
+    WANDER_WALK_RANGE_S,
+)
 from .i18n import fmt_de, fmt_pct_de, tr
 from .moods import (
     IDLE_FLOURISH_PROB,
@@ -40,6 +51,10 @@ class PetWidget(QWidget):
     HEART_LIFE_MS = 1200       # petting hearts float up and fade this long
     REACT_MS = 1300            # how long the petting reaction animation plays
     STARTLE_COOLDOWN_S = 30.0  # min. seconds between hover-startles while asleep
+    THROW_TICK_MS = 33         # throw-physics integration step (F12)
+    THROW_TIMEOUT_S = 6.0      # safety cap on one flight
+    THROW_SAMPLE_WINDOW_S = 0.12   # release speed is fit over this drag tail
+    DRAG_SAMPLE_COUNT = 6      # recent (stamp, pos) drag samples kept
 
     def __init__(self, owner: Optional["ClawdApp"] = None):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
@@ -91,6 +106,30 @@ class PetWidget(QWidget):
         self._press_global = None
         self._press_window = None
         self._dragging = False
+        self._drag_samples = []        # recent (monotonic stamp, global pos)
+
+        # F5: autonomous wandering (opt-in, walk/pause state machine)
+        self._wander_enabled = False
+        self._wander_state = "pause"   # "walk" | "pause"
+        self._wander_until = 0.0       # monotonic deadline of the current phase
+        self._wander_dir = 1           # walking direction: +1 right, -1 left
+        self._wander_facing = 1        # sprite facing (mirrored blit when -1)
+        self._wander_carry = 0.0       # sub-pixel movement accumulator
+        self._wander_timer = QTimer(self)
+        self._wander_timer.setInterval(WANDER_TICK_MS)
+        self._wander_timer.timeout.connect(self._wander_tick)
+
+        # F12: throw physics (started from a fast drag release)
+        self._throw_on = False
+        self._throw_v = [0.0, 0.0]     # velocity in px/s
+        self._throw_pos = [0.0, 0.0]   # float position (move() truncates)
+        self._throw_deadline = 0.0     # monotonic safety timeout
+        self._throw_timer = QTimer(self)
+        self._throw_timer.setInterval(self.THROW_TICK_MS)
+        self._throw_timer.timeout.connect(self._throw_tick)
+
+        # F8: click-through around the sprite (opt-in)
+        self._click_through = False
 
         self._anim_timer = QTimer(self)
         self._anim_timer.timeout.connect(self._tick)
@@ -232,6 +271,8 @@ class PetWidget(QWidget):
             if prev is not None:
                 self._mood_clock.restart()
             self._clock.restart()
+        if self._click_through:
+            self._apply_input_mask()   # the frame box changes with the mood
         self.update()
 
     def _current_pixmap(self) -> Optional[QPixmap]:
@@ -280,6 +321,17 @@ class PetWidget(QWidget):
         p.setOpacity(min(1.0, opacity))
         x = (self.width() - pm.width()) // 2
         y = self.height() - pm.height()          # feet on the ground
+        if self._wander_facing < 0:
+            # walking left: mirror the frame around its own vertical center —
+            # the GIFs' native facing is kept for walking right
+            p.save()
+            cx = x + pm.width() / 2.0
+            p.translate(cx, 0)
+            p.scale(-1.0, 1.0)
+            p.translate(-cx, 0)
+            p.drawPixmap(x, y, pm)
+            p.restore()
+            return
         p.drawPixmap(x, y, pm)
 
     def paintEvent(self, _event):
@@ -344,14 +396,19 @@ class PetWidget(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
+            if self._throw_active:
+                self._stop_throw()     # catch a flying Clawd mid-air
             self._press_global = event.globalPos()
             self._press_window = self.pos()
             self._dragging = False
+            self._drag_samples = [(time.monotonic(), event.globalPos())]
             event.accept()
 
     def mouseMoveEvent(self, event):
         if self._press_global is None or not (event.buttons() & Qt.LeftButton):
             return
+        self._drag_samples.append((time.monotonic(), event.globalPos()))
+        del self._drag_samples[:-self.DRAG_SAMPLE_COUNT]
         delta = event.globalPos() - self._press_global
         if not self._dragging and delta.manhattanLength() < self.DRAG_THRESHOLD:
             return
@@ -367,11 +424,17 @@ class PetWidget(QWidget):
         was_drag = self._dragging
         self._press_global = None
         self._dragging = False
-        if self.owner:
-            if was_drag:
+        if was_drag:
+            # a fast release flings Clawd (F12); a calm one just parks him —
+            # toggle_panel must never fire after either kind of drag
+            vx, vy = self._release_velocity()
+            if (vx * vx + vy * vy) ** 0.5 >= THROW_MIN_SPEED:
+                self._start_throw(vx, vy)
+            elif self.owner:
                 self.owner.save_position()
-            else:
-                self.owner.toggle_panel()
+        elif self.owner:
+            self.owner.toggle_panel()
+        self._drag_samples = []
         event.accept()
 
     def contextMenuEvent(self, event):
@@ -379,6 +442,188 @@ class PetWidget(QWidget):
             menu = self.owner.build_menu(None)
             menu.exec_(event.globalPos())
             menu.deleteLater()
+
+    # -------------------------------------------------- wandering (F5)
+
+    def _screen_avail(self) -> QRect:
+        """Available geometry of the screen Clawd currently stands on."""
+        screen = (QGuiApplication.screenAt(self.frameGeometry().center())
+                  or QGuiApplication.primaryScreen())
+        return screen.availableGeometry()
+
+    def enable_wander(self, on: bool):
+        self._wander_enabled = bool(on)
+        if self._wander_enabled:
+            self._wander_state = "pause"     # ease in with a pause first
+            self._wander_until = (time.monotonic()
+                                  + random.uniform(*WANDER_PAUSE_RANGE_S))
+            self._wander_timer.start()
+        else:
+            self._wander_timer.stop()
+            self._wander_state = "pause"
+            if self._wander_facing != 1:
+                self._wander_facing = 1      # back to the GIFs' native facing
+                self.update()
+
+    def _wander_blocked(self) -> bool:
+        """No autonomous movement while the user or Claude interacts."""
+        return (self._press_global is not None          # mid-drag
+                or self.underMouse()                    # cursor on Clawd
+                or (self.owner is not None
+                    and self.owner.panel.isVisible())   # panel open
+                or self._react_active                   # petting reaction
+                or self._throw_active                   # flying (F12)
+                or self._activity is not None           # visibly working
+                or self._quota_mood != "chill")         # alarmed or asleep
+
+    def _wander_tick(self):
+        now = time.monotonic()
+        if self._wander_blocked():
+            if self._wander_state == "walk":
+                self._wander_state = "pause"
+                if self.owner:
+                    self.owner.save_position()
+            # keep pushing the deadline so a fresh pause starts once free
+            self._wander_until = now + random.uniform(*WANDER_PAUSE_RANGE_S)
+            return
+        if now >= self._wander_until:
+            if self._wander_state == "walk":
+                self._wander_state = "pause"
+                self._wander_until = now + random.uniform(*WANDER_PAUSE_RANGE_S)
+                if self.owner:
+                    self.owner.save_position()   # persist once per stretch
+            else:
+                self._wander_state = "walk"
+                self._wander_dir = random.choice((-1, 1))
+                self._wander_carry = 0.0
+                self._wander_until = now + random.uniform(*WANDER_WALK_RANGE_S)
+            return
+        if self._wander_state != "walk":
+            return
+        avail = self._screen_avail()
+        self._wander_carry += WANDER_SPEED_PX * self._wander_dir
+        step = int(self._wander_carry)
+        self._wander_carry -= step
+        if step == 0:
+            return
+        x = self.x() + step
+        left, right = avail.left(), avail.right() - self.width()
+        if x <= left:                    # turn around at the screen edges
+            x, self._wander_dir = left, 1
+        elif x >= right:
+            x, self._wander_dir = right, -1
+        if self._wander_facing != self._wander_dir:
+            self._wander_facing = self._wander_dir
+            self.update()
+        self.move(x, self.y())
+        if self.owner:
+            self.owner.pet_moved()       # a visible bubble follows along
+
+    # -------------------------------------------------- throw physics (F12)
+
+    @property
+    def _throw_active(self) -> bool:
+        return self._throw_on
+
+    def _release_velocity(self):
+        """Release speed in px/s, fitted over the freshest drag samples."""
+        now = time.monotonic()
+        pts = [(t, p) for t, p in self._drag_samples
+               if now - t <= self.THROW_SAMPLE_WINDOW_S]
+        if len(pts) < 2:
+            return 0.0, 0.0
+        (t0, p0), (t1, p1) = pts[0], pts[-1]
+        dt = t1 - t0
+        if dt <= 0.0:
+            return 0.0, 0.0
+        return (p1.x() - p0.x()) / dt, (p1.y() - p0.y()) / dt
+
+    def _start_throw(self, vx: float, vy: float):
+        self._throw_on = True
+        self._throw_v = [vx, vy]
+        self._throw_pos = [float(self.x()), float(self.y())]
+        self._throw_deadline = time.monotonic() + self.THROW_TIMEOUT_S
+        self._throw_timer.start()
+
+    def _stop_throw(self):
+        self._throw_on = False
+        self._throw_timer.stop()
+
+    def _throw_step(self, dt: float, avail: QRect) -> bool:
+        """One physics integration step; returns True while still flying.
+
+        Kept free of timers and screen lookups so the trajectory is testable
+        headless: velocity/position live in plain floats, bounces mirror at
+        the given rect and the flight ends when Clawd rests on the floor.
+        """
+        vx, vy = self._throw_v
+        vy += THROW_GRAVITY * dt
+        x = self._throw_pos[0] + vx * dt
+        y = self._throw_pos[1] + vy * dt
+        left, right = avail.left(), avail.right() - self.width()
+        top, bottom = avail.top(), avail.bottom() - self.height()
+        if x < left:
+            x, vx = left, -vx * THROW_BOUNCE
+        elif x > right:
+            x, vx = right, -vx * THROW_BOUNCE
+        if y > bottom:                   # floor bounce
+            y = bottom
+            vy = -vy * THROW_BOUNCE
+            vx *= THROW_FRICTION
+        elif y < top:                    # ceiling bounce
+            y = top
+            vy = -vy * THROW_BOUNCE
+            vx *= THROW_FRICTION
+        self._throw_v = [vx, vy]
+        self._throw_pos = [x, y]
+        self.move(int(round(x)), int(round(y)))
+        if self.owner:
+            self.owner.pet_moved()
+        speed = (vx * vx + vy * vy) ** 0.5
+        grounded = y >= bottom - 0.5
+        if ((speed < THROW_STOP_SPEED and grounded)
+                or time.monotonic() >= self._throw_deadline):
+            self._throw_on = False
+            return False
+        return True
+
+    def _throw_tick(self):
+        if not self._throw_on:
+            self._throw_timer.stop()
+            return
+        if not self._throw_step(self.THROW_TICK_MS / 1000.0,
+                                self._screen_avail()):
+            self._throw_timer.stop()
+            if self.owner:
+                self.owner.save_position()
+
+    # -------------------------------------------------- click-through (F8)
+
+    def set_click_through(self, on: bool):
+        """Let clicks pass through the widget area next to the sprite (F8).
+
+        Simplification: the input mask is the BOUNDING BOX of the current
+        frame, not a pixel-exact silhouette. setMask() also clips painting,
+        so a pixel mask would visibly cut the mood cross-dissolve at the
+        sprite edge; the box keeps the fade intact while clicks land on the
+        window below wherever the (widest-mood-wide) widget is empty.
+        Dragging and petting keep working anywhere INSIDE the box — that is
+        intended. With the vector fallback (no sprites) this is a no-op.
+        """
+        self._click_through = bool(on)
+        if self._click_through:
+            self._apply_input_mask()
+        else:
+            self.clearMask()
+
+    def _apply_input_mask(self):
+        sprite = self._sprites.sprite(self.mood)
+        if sprite is None or not sprite.pixmaps:
+            return                       # vector fallback: keep full input
+        pm = sprite.pixmaps[0]           # all frames of a mood share one size
+        x = (self.width() - pm.width()) // 2
+        y = self.height() - pm.height()  # positioned like _blit: feet down
+        self.setMask(QRegion(x, y, pm.width(), pm.height()))
 
     # -------------------------------------------------- hover handling
 

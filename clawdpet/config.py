@@ -146,3 +146,18 @@ CODEX_ACTIVE_S = 20
 # same usage would have cost on pay-as-you-go.
 SONNET_INPUT_USD_PER_MTOK = 3.0
 
+# --- motion (F5/F12/F8) ---
+# F5: autonomous wandering (opt-in via the tray menu, default off). Clawd
+# alternates between random-length walks and pauses while he is idle.
+WANDER_TICK_MS = 33                 # movement timer tick (~30 fps)
+WANDER_SPEED_PX = 2.2               # horizontal pixels walked per tick
+WANDER_PAUSE_RANGE_S = (3.0, 10.0)  # random pause length between walks
+WANDER_WALK_RANGE_S = (2.0, 6.0)    # random length of one walking stretch
+
+# F12: throw physics — drag Clawd fast and let go to fling him.
+THROW_MIN_SPEED = 900.0    # px/s release speed required to start a throw
+THROW_GRAVITY = 2800.0     # px/s^2 downward acceleration during the flight
+THROW_BOUNCE = 0.55        # velocity kept on each floor/ceiling/wall bounce
+THROW_FRICTION = 0.82      # horizontal damping applied on floor/ceiling hits
+THROW_STOP_SPEED = 60.0    # px/s below which a grounded throw comes to rest
+

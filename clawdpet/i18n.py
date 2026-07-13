@@ -165,6 +165,9 @@ STRINGS = {
         # --- cost estimate + projects (F4/F10) ---
         "cost_line": "≈ API-Gegenwert: {c5} (5 h) · {cw} (Woche)",
         "projects_line": "Projekte: {parts}",
+        # --- motion (F5/F8) ---
+        "menu_wander": "Herumlaufen",
+        "menu_clickthrough": "Klicks durchlassen (neben Clawd)",
     },
     "en": {
         "panel_title": "Plan usage limits · {plan}",
@@ -261,6 +264,9 @@ STRINGS = {
         # --- cost estimate + projects (F4/F10) ---
         "cost_line": "≈ API equivalent: {c5} (5 h) · {cw} (week)",
         "projects_line": "Projects: {parts}",
+        # --- motion (F5/F8) ---
+        "menu_wander": "Wander around",
+        "menu_clickthrough": "Click-through (around Clawd)",
     },
 }
 

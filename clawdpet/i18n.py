@@ -168,6 +168,13 @@ STRINGS = {
         # --- motion (F5/F8) ---
         "menu_wander": "Herumlaufen",
         "menu_clickthrough": "Klicks durchlassen (neben Clawd)",
+        # --- customization (F2/F13) ---
+        "menu_size": "Größe",
+        "menu_sprites_choose": "Sprite-Ordner wählen …",
+        "menu_sprites_reset": "Standard-Sprites verwenden",
+        "sprites_invalid_title": "Kein Sprite-Pack",
+        "sprites_invalid_text": "Der Ordner enthält keine bekannten "
+                                "Clawd-GIFs\n(z. B. clawd-idle.gif).",
     },
     "en": {
         "panel_title": "Plan usage limits · {plan}",
@@ -267,6 +274,13 @@ STRINGS = {
         # --- motion (F5/F8) ---
         "menu_wander": "Wander around",
         "menu_clickthrough": "Click-through (around Clawd)",
+        # --- customization (F2/F13) ---
+        "menu_size": "Size",
+        "menu_sprites_choose": "Choose sprite folder …",
+        "menu_sprites_reset": "Use default sprites",
+        "sprites_invalid_title": "No sprite pack",
+        "sprites_invalid_text": "The folder contains no known "
+                                "Clawd GIFs\n(e.g. clawd-idle.gif).",
     },
 }
 

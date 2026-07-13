@@ -82,12 +82,11 @@ class PetWidget(QWidget):
         self._idle_timer.setInterval(IDLE_SWITCH_MS)
         self._idle_timer.timeout.connect(self._tick_idle)
 
+        # F2/F13: current sprite scaling; rebuild() swaps these at runtime
+        self._height = PET_HEIGHT
+        self._sprite_dir = None
         self._sprites = SpriteSet()
-        if self._sprites.sprites:
-            self.setFixedSize(QSize(self._sprites.width, self._sprites.height))
-        else:
-            scale = PET_HEIGHT / ClawdArt.H
-            self.setFixedSize(QSize(int(ClawdArt.W * scale + 0.5), PET_HEIGHT))
+        self._apply_widget_size()
 
         # sprite playback / cross-dissolve state
         self._clock = QElapsedTimer()
@@ -142,6 +141,42 @@ class PetWidget(QWidget):
 
         self._apply_mood()
         self.setToolTip(tr("tooltip_wait"))
+
+    # -------------------------------------------------- rebuild (F2/F13)
+
+    def _apply_widget_size(self):
+        """Fix the widget size to the sprite set (or the vector fallback)."""
+        if self._sprites.sprites:
+            self.setFixedSize(QSize(self._sprites.width, self._sprites.height))
+        else:
+            scale = self._height / ClawdArt.H
+            self.setFixedSize(QSize(int(ClawdArt.W * scale + 0.5),
+                                    self._height))
+
+    def rebuild(self, height: int = PET_HEIGHT, sprite_dir=None):
+        """Reload the sprites with a new size (F2) and/or pack folder (F13).
+
+        The current values are kept in self._height / self._sprite_dir so a
+        caller changing only one aspect can pass the other one back in.
+        """
+        self._height = height
+        self._sprite_dir = sprite_dir
+        self._sprites = SpriteSet(height=height, sprite_dir=sprite_dir)
+        self._apply_widget_size()
+        # old frames have the wrong scale — never cross-dissolve from them
+        self._prev_pixmap = None
+        # refresh the idle-flourish pool for the new pack, keep timer state
+        self._idle_pool = [m for m in IDLE_FLOURISHES
+                           if m in self._sprites.sprites]
+        if self._idle_pool:
+            if not self._idle_timer.isActive():
+                self._idle_timer.start()
+        else:
+            self._idle_timer.stop()
+            self._idle_variant = None
+        if not self._react_active:
+            self._update_mood()      # re-apply MOOD_FALLBACK for the new pack
+        self._apply_mood()           # restarts the clock + click-through mask
 
     # -------------------------------------------------- state / painting
 

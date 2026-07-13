@@ -867,6 +867,74 @@ def run_selftest() -> int:
     capp.pet.enable_wander(False)         # selftest instance: timers off
     print("[selftest] W2 motion OK")
 
+    # --- W3: customization ---
+    import shutil
+    from . import sounds
+    from .config import PET_HEIGHT, PET_SIZE_FACTORS
+
+    # F2: SpriteSet scales to the requested height, widget rebuild follows
+    assert set(PET_SIZE_FACTORS) == {"S", "M", "L"}
+    s_small = SpriteSet(height=66)
+    if s_small.sprites:
+        assert s_small.height == 66
+        assert s_small.width < SpriteSet(height=132).width, \
+            "smaller sprite set not narrower"
+    pet.rebuild(height=92)
+    assert pet.height() == 92, f"rebuild height not applied: {pet.height()}"
+    assert not pet.grab().isNull(), "rebuilt pet did not render"
+    pet.rebuild(height=PET_HEIGHT)               # back to the original state
+    assert pet.height() == PET_HEIGHT
+
+    # F2 app level: size preset round-trips through QSettings + pet geometry
+    _w3_size = capp.settings.value("pet_size")
+    capp.set_pet_size("S")
+    assert str(capp.settings.value("pet_size")) == "S"
+    assert capp.pet.height() == int(PET_HEIGHT * PET_SIZE_FACTORS["S"])
+    assert capp.pet.height() < PET_HEIGHT, "size S did not shrink the pet"
+    capp.set_pet_size("M")
+    assert capp.pet.height() == PET_HEIGHT
+    if _w3_size is None:
+        capp.settings.remove("pet_size")
+    else:
+        capp.settings.setValue("pet_size", _w3_size)
+
+    # F9: committed WAV assets exist; play() is bool and never raises
+    _w3_sounds = Path(__file__).resolve().parent.parent / "sounds"
+    assert (_w3_sounds / "done.wav").is_file(), "done.wav asset missing"
+    assert (_w3_sounds / "attention.wav").is_file(), "attention.wav missing"
+    assert isinstance(sounds.play("done"), bool)     # offscreen may be False
+    assert isinstance(sounds.play("done"), bool)     # cached effect reused
+    assert sounds.play("unknown") is False
+
+    # F13: custom sprite packs — empty folder falls back, partial pack loads
+    with tempfile.TemporaryDirectory() as td:
+        w3_empty = Path(td) / "empty"
+        w3_empty.mkdir()
+        assert SpriteSet(sprite_dir=w3_empty).sprites == {}, \
+            "empty pack folder must load no sprites"
+        w3_idle = SPRITE_DIR / SPRITE_FILES["chill"]
+        if w3_idle.is_file():
+            w3_pack = Path(td) / "pack"
+            w3_pack.mkdir()
+            shutil.copy(w3_idle, w3_pack / SPRITE_FILES["chill"])
+            assert set(SpriteSet(sprite_dir=w3_pack).sprites) == {"chill"}, \
+                "one-gif pack should load exactly the chill mood"
+            pet.rebuild(sprite_dir=w3_pack)
+            assert not pet.grab().isNull(), "custom-pack pet did not render"
+            # app level: setter round-trip without any QFileDialog involved
+            _w3_sdir = capp.settings.value("sprite_dir")
+            assert capp._set_sprite_dir(w3_pack) is True
+            assert str(capp.settings.value("sprite_dir")) == str(w3_pack)
+            assert capp.sprite_dir == w3_pack
+            capp.reset_sprite_dir()
+            assert capp.sprite_dir is None
+            assert capp.settings.value("sprite_dir") is None
+            if _w3_sdir is not None:
+                capp.settings.setValue("sprite_dir", _w3_sdir)
+        pet.rebuild(sprite_dir=None, height=PET_HEIGHT)  # restore defaults
+    assert pet.height() == PET_HEIGHT
+    print("[selftest] W3 customization OK")
+
     print("[selftest] OK")
     del app
     return 0

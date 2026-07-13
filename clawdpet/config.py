@@ -161,3 +161,8 @@ THROW_BOUNCE = 0.55        # velocity kept on each floor/ceiling/wall bounce
 THROW_FRICTION = 0.82      # horizontal damping applied on floor/ceiling hits
 THROW_STOP_SPEED = 60.0    # px/s below which a grounded throw comes to rest
 
+# --- customization (F2/F9/F13) ---
+# F2: pet size presets, chosen via the tray "Size" submenu. Each value is a
+# factor applied to PET_HEIGHT (the sprites rescale, the panel/tray art not).
+PET_SIZE_FACTORS = {"S": 0.7, "M": 1.0, "L": 1.4}
+

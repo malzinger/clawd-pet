@@ -357,14 +357,22 @@ class Sprite:
 
 
 class SpriteSet:
-    """Loads the per-mood animations and scales them to one common size."""
+    """Loads the per-mood animations and scales them to one common size.
 
-    def __init__(self):
+    height picks the on-screen pixel height (F2: size presets), sprite_dir
+    an alternative sprite pack folder (F13); None means the bundled
+    SPRITE_DIR. A folder without any known SPRITE_FILES gif loads nothing,
+    so the vector fallback takes over exactly like with a missing folder.
+    """
+
+    def __init__(self, height: int = PET_HEIGHT,
+                 sprite_dir: Optional[Path] = None):
         self.sprites = {}
-        if not SPRITE_DIR.is_dir():
+        base = SPRITE_DIR if sprite_dir is None else Path(sprite_dir)
+        if not base.is_dir():
             return
         for mood, fname in SPRITE_FILES.items():
-            fp = SPRITE_DIR / fname
+            fp = base / fname
             if not fp.is_file():
                 continue
             sprite = Sprite(fp)
@@ -375,11 +383,11 @@ class SpriteSet:
         # One shared scale factor keeps Clawd the same size in every mood —
         # per-mood "fill the widget" scaling made him grow and shrink.
         tallest = max(s.bbox.height() for s in self.sprites.values())
-        scale = PET_HEIGHT / tallest
+        scale = height / tallest
         for sprite in self.sprites.values():
             sprite.build(scale)
         self.width = max(s.pixmaps[0].width() for s in self.sprites.values())
-        self.height = PET_HEIGHT
+        self.height = height
 
     def sprite(self, mood: str) -> Optional[Sprite]:
         return self.sprites.get(mood)

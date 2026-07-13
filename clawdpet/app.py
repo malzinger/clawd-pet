@@ -21,13 +21,16 @@ from PyQt5.QtGui import QCursor, QGuiApplication
 from PyQt5.QtNetwork import QHostAddress, QUdpSocket
 from PyQt5.QtWidgets import (
     QAction,
+    QActionGroup,
     QApplication,
+    QFileDialog,
     QInputDialog,
     QMenu,
     QMessageBox,
     QSystemTrayIcon,
 )
 
+from . import sounds
 from .activity import newest_codex_log, read_codex_context, read_session_context
 from .api import collect_usage
 from .art import make_app_icon
@@ -42,8 +45,11 @@ from .config import (
     CLAUDE_SETTINGS_FILE,
     HOOK_UDP_PORT,
     ORG_NAME,
+    PET_HEIGHT,
+    PET_SIZE_FACTORS,
     RELEASES_URL,
     SCAN_INTERVAL_MS,
+    SPRITE_FILES,
     UPDATE_CHECK,
     UPDATE_RECHECK_MS,
     WAIT_ALERT_MIN_S,
@@ -195,6 +201,20 @@ class ClawdApp:
         if with_tray and QSystemTrayIcon.isSystemTrayAvailable():
             self._setup_tray()
 
+        # F2/F13: apply the saved size preset + custom sprite pack (one rebuild)
+        size_key = str(self.settings.value("pet_size", "M") or "M")
+        self.pet_size = size_key if size_key in PET_SIZE_FACTORS else "M"
+        self.sprite_dir: Optional[Path] = None
+        sdir_raw = str(self.settings.value("sprite_dir", "") or "")
+        if sdir_raw:
+            if Path(sdir_raw).is_dir():
+                self.sprite_dir = Path(sdir_raw)
+            else:
+                self.settings.remove("sprite_dir")   # folder gone -> default
+        if self.pet_size != "M" or self.sprite_dir is not None:
+            self.pet.rebuild(height=self._pet_height(),
+                             sprite_dir=self.sprite_dir)
+
         self._restore_position()
         self.pet.enable_wander(self.wander)          # F5 (opt-in)
         self.pet.set_click_through(self.click_through)   # F8 (opt-in)
@@ -331,6 +351,26 @@ class ClawdApp:
         act_click.setChecked(self.click_through)
         act_click.triggered.connect(self.toggle_click_through)
         menu.addAction(act_click)
+
+        size_menu = menu.addMenu(tr("menu_size"))    # F2: S / M / L presets
+        size_group = QActionGroup(size_menu)
+        size_group.setExclusive(True)
+        for key in PET_SIZE_FACTORS:
+            act_size = QAction(key, size_menu)
+            act_size.setCheckable(True)
+            act_size.setChecked(key == self.pet_size)
+            act_size.triggered.connect(
+                lambda _checked=False, k=key: self.set_pet_size(k))
+            size_group.addAction(act_size)
+            size_menu.addAction(act_size)
+
+        act_sprites = QAction(tr("menu_sprites_choose"), menu)   # F13
+        act_sprites.triggered.connect(self.choose_sprite_dir)
+        menu.addAction(act_sprites)
+        if self.sprite_dir is not None:
+            act_spr_reset = QAction(tr("menu_sprites_reset"), menu)
+            act_spr_reset.triggered.connect(self.reset_sprite_dir)
+            menu.addAction(act_spr_reset)
         menu.addSeparator()
 
         if self.tray is not None:   # without a tray there is no way to un-hide
@@ -557,7 +597,8 @@ class ClawdApp:
         self._last_alert_mono = now
         self._last_toast_was_update = False
         self.tray.showMessage(title, text, QSystemTrayIcon.Information, 7000)
-        if self.notify_sound:
+        # F9: real chime when available; beep stays the offscreen/CI fallback
+        if self.notify_sound and not sounds.play("attention"):
             QApplication.beep()
 
     def _alert_turn_done(self, elapsed: float):
@@ -580,6 +621,52 @@ class ClawdApp:
         self.settings.setValue("click_through", self.click_through)
         self.pet.set_click_through(self.click_through)
         self._rebuild_tray_menu()
+
+    # -------------------------------------------------- customization (F2/F13)
+
+    def _pet_height(self) -> int:
+        return int(PET_HEIGHT * PET_SIZE_FACTORS[self.pet_size])
+
+    def _rebuild_pet(self):
+        """Apply the current size preset + sprite pack to the pet."""
+        self.pet.rebuild(height=self._pet_height(), sprite_dir=self.sprite_dir)
+        self.pet_moved()             # panel/bubble follow the new geometry
+        self._rebuild_tray_menu()
+
+    def set_pet_size(self, key: str):
+        if key not in PET_SIZE_FACTORS:
+            return
+        self.pet_size = key
+        self.settings.setValue("pet_size", key)
+        self._rebuild_pet()
+
+    @staticmethod
+    def _dir_has_sprites(path: Path) -> bool:
+        """True when the folder holds at least one known Clawd gif."""
+        return any((path / f).is_file() for f in SPRITE_FILES.values())
+
+    def choose_sprite_dir(self):
+        chosen = QFileDialog.getExistingDirectory(
+            None, tr("menu_sprites_choose"))
+        if not chosen:
+            return
+        if not self._set_sprite_dir(Path(chosen)):
+            QMessageBox.warning(None, tr("sprites_invalid_title"),
+                                tr("sprites_invalid_text"))
+
+    def _set_sprite_dir(self, path: Path) -> bool:
+        """Activate a sprite pack; False (setting untouched) when invalid."""
+        if not self._dir_has_sprites(path):
+            return False
+        self.sprite_dir = path
+        self.settings.setValue("sprite_dir", str(path))
+        self._rebuild_pet()
+        return True
+
+    def reset_sprite_dir(self):
+        self.sprite_dir = None
+        self.settings.remove("sprite_dir")
+        self._rebuild_pet()
 
     def toggle_update_check(self):
         self.check_updates = not self.check_updates

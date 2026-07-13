@@ -757,6 +757,116 @@ def run_selftest() -> int:
     assert SONNET_INPUT_USD_PER_MTOK == 3.0
     print("[selftest] cost estimate + project split OK")
 
+    # --- W2: motion ---
+    from PyQt5.QtCore import QPoint
+    from .config import THROW_MIN_SPEED
+
+    # F5 wander: a forced walk state moves horizontally and stays on-screen
+    pet.set_pct(10)
+    pet.set_activity(None)
+    pet.enable_wander(True)
+    assert pet._wander_timer.isActive(), "wander timer not running"
+    wav = pet._screen_avail()
+    pet.move(wav.center().x() - pet.width() // 2, wav.bottom() - pet.height())
+    pet._wander_state = "walk"
+    pet._wander_dir = 1
+    pet._wander_until = time.monotonic() + 60.0    # keep walking for the test
+    wx0, wy0 = pet.x(), pet.y()
+    for _ in range(5):
+        pet._wander_tick()
+    assert pet.x() != wx0 and pet.y() == wy0, "wander did not walk horizontally"
+    assert wav.left() <= pet.x() <= wav.right() - pet.width(), \
+        "wander left the available screen area"
+    # blocker: a live activity must freeze the walk immediately
+    pet.set_activity(("working", "Bash"))
+    wbx = pet.x()
+    pet._wander_tick()
+    assert pet.x() == wbx, "wander moved while Clawd is working"
+    assert pet._wander_state == "pause", "blocked walk not paused"
+    pet.set_activity(None)
+    # facing flip: walking left renders via the mirrored blit
+    pet._wander_facing = -1
+    assert not pet.grab().isNull(), "mirrored (left-facing) render failed"
+    pet.enable_wander(False)
+    assert not pet._wander_timer.isActive(), "wander timer still active"
+    assert pet._wander_facing == 1, "facing not reset on disable"
+
+    # F12 throw: headless trajectory terminates at rest inside the rect
+    tavail = QRect(0, 0, 2000, 1000)
+    pet.move(100, 100)
+    pet._start_throw(1200.0, -300.0)
+    assert pet._throw_active
+    tsteps = 0
+    while pet._throw_step(0.033, tavail):
+        tsteps += 1
+        assert tsteps < 1000, "throw physics did not terminate"
+    assert not pet._throw_active
+    assert tavail.left() <= pet.x() <= tavail.right() - pet.width()
+    assert tavail.top() <= pet.y() <= tavail.bottom() - pet.height()
+    pet._throw_timer.stop()               # headless: no event loop ran
+    # ceiling bounce: a hard upward throw must mirror at avail.top()
+    pet.move(500, 5)
+    pet._start_throw(200.0, -2500.0)
+    tsteps = 0
+    while pet._throw_step(0.033, tavail):
+        tsteps += 1
+        assert tsteps < 1000, "ceiling throw did not terminate"
+        assert pet.y() >= tavail.top(), "throw escaped through the ceiling"
+    pet._throw_timer.stop()
+    # release-velocity estimate from known synthetic drag samples
+    tnow = time.monotonic()
+    pet._drag_samples = [(tnow - 0.10, QPoint(0, 0)),
+                         (tnow - 0.05, QPoint(60, 0)),
+                         (tnow, QPoint(120, 0))]        # 120 px in 0.1 s
+    tvx, tvy = pet._release_velocity()
+    assert 1000.0 <= tvx <= 1400.0, f"vx estimate off: {tvx}"
+    assert abs(tvy) < 1.0, f"vy estimate off: {tvy}"
+    assert (tvx * tvx + tvy * tvy) ** 0.5 >= THROW_MIN_SPEED
+    pet._drag_samples = []
+    assert pet._release_velocity() == (0.0, 0.0)        # no samples -> no throw
+
+    # F8 click-through: bounding-box input mask set and cleared with sprites
+    if pet._sprites.sprites:
+        pet.set_click_through(True)
+        assert not pet.mask().isEmpty(), "click-through mask missing"
+        assert not pet.grab().isNull(), "masked render failed"
+        pet.set_click_through(False)
+        assert pet.mask().isEmpty(), "input mask not cleared"
+        assert not pet.grab().isNull(), "unmasked render failed"
+    else:
+        pet.set_click_through(True)       # vector fallback: must be a no-op
+        pet.set_click_through(False)
+
+    # leave the pet tidy for anything running after this block
+    assert not pet._wander_timer.isActive() and not pet._throw_active
+    pet.set_pct(10)
+    pet.set_activity(None)
+
+    # app level: toggles round-trip through QSettings without a tray
+    _w2_wander = capp.settings.value("wander")
+    _w2_click = capp.settings.value("click_through")
+    wv0 = capp.wander
+    capp.toggle_wander()
+    assert capp.wander == (not wv0)
+    assert capp.settings.value("wander", type=bool) == capp.wander
+    capp.toggle_wander()
+    assert capp.wander == wv0
+    assert capp.pet._wander_timer.isActive() == wv0   # timer mirrors the setting
+    cv0 = capp.click_through
+    capp.toggle_click_through()
+    assert capp.click_through == (not cv0)
+    assert capp.settings.value("click_through", type=bool) == capp.click_through
+    capp.toggle_click_through()
+    assert capp.click_through == cv0
+    # restore the user's stored values (or leave no trace at all)
+    for _key, _old in (("wander", _w2_wander), ("click_through", _w2_click)):
+        if _old is None:
+            capp.settings.remove(_key)
+        else:
+            capp.settings.setValue(_key, _old)
+    capp.pet.enable_wander(False)         # selftest instance: timers off
+    print("[selftest] W2 motion OK")
+
     print("[selftest] OK")
     del app
     return 0

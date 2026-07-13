@@ -144,6 +144,8 @@ class ClawdApp:
         self.quiet = self.settings.value("quiet", False, type=bool)
         self.notify_enabled = self.settings.value("notify", True, type=bool)
         self.notify_sound = self.settings.value("notify_sound", False, type=bool)
+        self.wander = self.settings.value("wander", False, type=bool)
+        self.click_through = self.settings.value("click_through", False, type=bool)
         # burn-rate history and last pct are kept PER SOURCE ("api"/"logs"):
         # the two modes report on different absolute scales, so cross-comparing
         # them would fake resets — but a transient api->logs->api fallback (an
@@ -194,6 +196,8 @@ class ClawdApp:
             self._setup_tray()
 
         self._restore_position()
+        self.pet.enable_wander(self.wander)          # F5 (opt-in)
+        self.pet.set_click_through(self.click_through)   # F8 (opt-in)
 
     # -------------------------------------------------- lifecycle
 
@@ -315,6 +319,18 @@ class ClawdApp:
         act_upd.setChecked(self.check_updates)
         act_upd.triggered.connect(self.toggle_update_check)
         menu.addAction(act_upd)
+
+        act_wander = QAction(tr("menu_wander"), menu)
+        act_wander.setCheckable(True)
+        act_wander.setChecked(self.wander)
+        act_wander.triggered.connect(self.toggle_wander)
+        menu.addAction(act_wander)
+
+        act_click = QAction(tr("menu_clickthrough"), menu)
+        act_click.setCheckable(True)
+        act_click.setChecked(self.click_through)
+        act_click.triggered.connect(self.toggle_click_through)
+        menu.addAction(act_click)
         menu.addSeparator()
 
         if self.tray is not None:   # without a tray there is no way to un-hide
@@ -551,6 +567,18 @@ class ClawdApp:
 
     def toggle_autostart(self):
         set_autostart(not autostart_enabled())
+        self._rebuild_tray_menu()
+
+    def toggle_wander(self):
+        self.wander = not self.wander
+        self.settings.setValue("wander", self.wander)
+        self.pet.enable_wander(self.wander)
+        self._rebuild_tray_menu()
+
+    def toggle_click_through(self):
+        self.click_through = not self.click_through
+        self.settings.setValue("click_through", self.click_through)
+        self.pet.set_click_through(self.click_through)
         self._rebuild_tray_menu()
 
     def toggle_update_check(self):

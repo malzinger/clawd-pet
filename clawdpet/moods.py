@@ -35,15 +35,20 @@ PET_SPAM_WINDOW_S = 3.0     # over-petting window
 PET_SPAM_COUNT = 3          # this many pets within the window -> annoyed
 
 # Which animation each running tool maps to (used only when quota is calm).
+# Task/Agent = Claude delegates to subagents -> Clawd juggles them.
 TOOL_MOODS = {
     "Read": "read", "Grep": "read", "Glob": "read",
     "WebFetch": "read", "WebSearch": "read",
     "Edit": "type", "Write": "type", "MultiEdit": "type", "NotebookEdit": "type",
-    "Bash": "focus", "PowerShell": "focus", "Task": "focus", "Agent": "focus",
+    "Bash": "focus", "PowerShell": "focus", "Task": "juggle", "Agent": "juggle",
 }
 
 # If a mapped animation is missing (older sprites/ folder), fall back sensibly.
+# "juggle" falls back to "focus": Task/Agent map to it, so a missing gif should
+# still read as "working", not "chilling". Idle flourishes are unaffected by
+# this — they are only picked from sprites that actually loaded (see
+# PetWidget._idle_pool).
 MOOD_FALLBACK = {"type": "focus", "read": "chill", "think": "focus",
                  "notify": "happy", "pet": "happy", "annoyed": "happy",
-                 "juggle": "chill", "conduct": "chill", "sweep": "chill",
+                 "juggle": "focus", "conduct": "chill", "sweep": "chill",
                  "carry": "chill"}

@@ -37,6 +37,14 @@ pip install pyinstaller
 python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ico" --add-data "sprites;sprites" --add-data "clawd_hook.py;." clawd_pet.py
 ```
 
+## Code layout
+
+`clawd_pet.py` is just the entry point; the implementation lives in the
+`clawdpet/` package — roughly: `usage` (log scan, 5-hour window,
+calibration), `api` (read-only live sync), `activity`/`hooks` (real time),
+`art`/`pet`/`panel`/`bubble` (Qt UI), `app` (controller + tray) and
+`selftest` (headless smoke test, also run in CI).
+
 ## Clawd's moods
 
 | Usage           | Mood     | What you see                     |
@@ -92,8 +100,8 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
 - **Update check:** on launch (and every 6 h) Clawd asks GitHub whether a
   newer release exists and, if so, shows a bubble you can click to download.
   Toggle it off in the tray menu.
-- **Start with Windows:** a tray-menu checkbox registers or removes
-  autostart (Windows only).
+- **Start at login:** a tray-menu checkbox registers or removes autostart
+  (Windows Run key / macOS LaunchAgent).
 - **Reacts in real time:** a lightweight watcher follows the newest session
   log — Clawd hammers away while Claude runs tools, turns happy when the turn
   finishes, and speech bubbles announce what is happening ("führt Befehle
@@ -102,6 +110,8 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
   Claude Code hooks so the pet reacts instantly — including "Claude is
   waiting for your input". Needs Python on PATH; a `.clawd-bak` backup of
   `settings.json` is kept and the entry can be removed from the same menu.
+  Events are authenticated with a local token (`~/.clawd/hook_token`), so no
+  other process on the machine can spoof them.
 - **Pet him:** double-click Clawd and hearts float up.
 - **Bilingual UI:** the whole app (panel, bubbles, menus, dialogs, number
   formats) switches between English and German — tray menu → "Sprache/Language".

@@ -1,0 +1,49 @@
+"""Mood mapping: quota level + running tool -> animation."""
+
+def mood_for_pct(pct: float) -> str:
+    if pct >= 100.0:
+        return "limit"
+    if pct >= 80.0:
+        return "panic"
+    if pct >= 50.0:
+        return "focus"
+    return "chill"
+
+
+MOOD_COLORS = {
+    "sleep": "#3fb950",
+    "chill": "#3fb950",
+    "read": "#3fb950",
+    "think": "#3fb950",
+    "type": "#d29922",
+    "focus": "#d29922",
+    "notify": "#d29922",
+    "happy": "#3fb950",
+    "panic": "#f0883e",
+    "limit": "#f85149",
+    "pet": "#3fb950",
+    "annoyed": "#d29922",
+    "juggle": "#3fb950", "conduct": "#3fb950", "sweep": "#3fb950",
+    "carry": "#3fb950",
+}
+
+# Random idle animations played now and then while Clawd is calm (mood "chill").
+IDLE_FLOURISHES = ("juggle", "conduct", "sweep", "carry")
+IDLE_SWITCH_MS = 6000       # how often the idle animation may change
+IDLE_FLOURISH_PROB = 0.45   # chance an idle tick starts a flourish (else idle)
+PET_SPAM_WINDOW_S = 3.0     # over-petting window
+PET_SPAM_COUNT = 3          # this many pets within the window -> annoyed
+
+# Which animation each running tool maps to (used only when quota is calm).
+TOOL_MOODS = {
+    "Read": "read", "Grep": "read", "Glob": "read",
+    "WebFetch": "read", "WebSearch": "read",
+    "Edit": "type", "Write": "type", "MultiEdit": "type", "NotebookEdit": "type",
+    "Bash": "focus", "PowerShell": "focus", "Task": "focus", "Agent": "focus",
+}
+
+# If a mapped animation is missing (older sprites/ folder), fall back sensibly.
+MOOD_FALLBACK = {"type": "focus", "read": "chill", "think": "focus",
+                 "notify": "happy", "pet": "happy", "annoyed": "happy",
+                 "juggle": "chill", "conduct": "chill", "sweep": "chill",
+                 "carry": "chill"}

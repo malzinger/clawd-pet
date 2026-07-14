@@ -2058,11 +2058,15 @@ def run_selftest() -> int:
     pet.set_generating(False)
     pet.set_pct(60)                                   # "focus" quota mood
     assert pet._quota_mood == "focus", pet._quota_mood
-    assert pet._calm_enough(), "focus is calm enough for motion features"
     assert not pet._chase_blocked(), "chase must work at 60 % usage"
-    pet.set_pct(90)                                   # "panic" still blocks
-    assert not pet._calm_enough()
-    assert pet._chase_blocked()
+    pet.set_pct(93)                                   # panic must NOT block:
+    assert pet._quota_mood == "panic"                 # an explicitly enabled
+    assert not pet._chase_blocked(), \
+        "quota mood must never overrule an explicitly enabled chase"
+    assert not pet._wander_blocked() or pet._activity is not None
+    pet._quota_mood = "sleep"                         # asleep: wander rests,
+    assert pet._wander_blocked()                      # but a chase may wake
+    assert not pet._chase_blocked(), "oneko wakes up to chase"
     pet.set_pct(60)
     pet.set_activity(("working", "Edit"))             # Claude works ...
     assert not pet._window_sit_blocked(), \
@@ -2071,10 +2075,11 @@ def run_selftest() -> int:
     pet.set_activity(("waiting", None))               # ... Claude waits ...
     assert not pet._chase_blocked(), \
         "a WAITING Claude must not block the chase — that is when the user's cursor moves"
+    pet.set_pct(93)                                   # gait wins at ANY mood
     pet._chase_state = "chase"
     pet._update_mood()
     if "carry" in pet._sprites.sprites:
-        assert pet.mood == "carry", "chase gait must show during 'happy' mood"
+        assert pet.mood == "carry", "chase gait must show even while panicking"
     pet._chase_state = "wait"
     pet.set_activity(None)
     pet.set_pct(10)

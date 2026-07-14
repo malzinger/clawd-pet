@@ -148,6 +148,13 @@ calibration), `api` (read-only live sync), `activity`/`hooks` (real time),
   says so (status page check, fail-open).
 - **Cursor chase (opt-in):** oneko-style — while idle Clawd occasionally
   chases your mouse cursor, catches it, and naps on it until it escapes.
+- **Levels & evolution:** Clawd eats your tokens — XP accumulates into
+  levels and evolution titles (Hatchling → Crabling → … → Legend), shown
+  in the panel; level-ups earn a celebration hop. No neglect mechanics.
+- **Remote approval via Telegram (opt-in):** bring your own bot (token +
+  chat id, stored 0600) and permission questions also reach your phone
+  with Allow/Deny buttons — first answer wins (local click or remote
+  tap), and no answer still falls back to the normal terminal prompt.
 - **Battery-friendly:** after a minute of true idleness the animation
   drops to a slow tick and snaps back instantly on any activity.
 - **Cost estimate & project split:** the panel shows the approximate

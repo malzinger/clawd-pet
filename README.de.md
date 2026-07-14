@@ -152,6 +152,14 @@ Paket `clawdpet/` — grob: `usage` (Log-Scan, 5-h-Fenster, Kalibrierung),
   Panel Bescheid (Status-Page-Check, fail-open).
 - **Cursorjagd (opt-in):** oneko-Style — im Leerlauf jagt Clawd gelegentlich
   den Mauszeiger, fängt ihn und schläft darauf ein, bis er entkommt.
+- **Level & Evolution:** Clawd frisst deine Tokens — XP sammeln sich zu
+  Leveln und Evolutions-Titeln (Hatchling → Crabling → … → Legend) im
+  Panel; Level-ups gibt es mit Jubel-Hüpfer. Keine Vernachlässigungs-Strafen.
+- **Remote-Freigabe via Telegram (opt-in):** Eigenen Bot mitbringen
+  (Token + Chat-ID, 0600 gespeichert) und Berechtigungsfragen kommen
+  zusätzlich mit Erlauben/Ablehnen-Buttons aufs Handy — die erste Antwort
+  gewinnt (Klick am Rechner oder Tap am Handy), ohne Antwort greift
+  weiterhin der normale Terminal-Prompt.
 - **Akku-schonend:** Nach einer Minute echtem Leerlauf taktet die Animation
   herunter und springt bei jeder Aktivität sofort zurück.
 - **Kosten-Schätzung & Projekt-Split:** Das Panel zeigt den ungefähren

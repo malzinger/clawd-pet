@@ -235,6 +235,10 @@ STRINGS = {
                                    "überschreibt sie nicht — bitte zuerst manuell "
                                    "entfernen.",
         "row_context": "Kontext-Fenster",
+        # --- G: gamification ---
+        "levelup_title": "Level {n}!",
+        "levelup_text": "Clawd ist jetzt {title}.",
+        "progress_line": "Level {n} · {title} · {xp} XP (nächstes: {nxt})",
     },
     "en": {
         "panel_title": "Plan usage limits · {plan}",
@@ -398,6 +402,10 @@ STRINGS = {
                                    "custom status line.\nClawd will not overwrite "
                                    "it — please remove it manually first.",
         "row_context": "Context window",
+        # --- G: gamification ---
+        "levelup_title": "Level {n}!",
+        "levelup_text": "Clawd is now a {title}.",
+        "progress_line": "Level {n} · {title} · {xp} XP (next: {nxt})",
     },
 }
 

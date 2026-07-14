@@ -175,3 +175,17 @@ THROW_STOP_SPEED = 60.0    # px/s below which a grounded throw comes to rest
 # factor applied to PET_HEIGHT (the sprites rescale, the panel/tray art not).
 PET_SIZE_FACTORS = {"S": 0.7, "M": 1.0, "L": 1.4}
 
+# --- X2: hook events + statusline ---
+# Newer Claude Code hook events the activity hook also registers for.
+# Events arriving from an old clawd_hook.py copy (or unknown ones) are
+# ignored gracefully by the receiver, so this list can only grow.
+HOOK_EVENTS += [
+    "SubagentStart", "SubagentStop",     # Clawd juggles running subagents
+    "PostToolUseFailure", "StopFailure",  # a failure startles the pet
+    "PreCompact", "PostCompact",          # sweeping up while compacting
+    "SessionEnd",                         # clears hook-driven activity state
+]
+# Context-window fill from the Claude Code statusline (clawd_statusline.py):
+# the panel hides its context row when no update arrived for this long.
+CONTEXT_STALE_S = 120
+

@@ -41,6 +41,9 @@ TOOL_MOODS = {
     "WebFetch": "read", "WebSearch": "read",
     "Edit": "type", "Write": "type", "MultiEdit": "type", "NotebookEdit": "type",
     "Bash": "focus", "PowerShell": "focus", "Task": "juggle", "Agent": "juggle",
+    # X2: pseudo-tool used by the hook receiver while Claude Code compacts the
+    # context (PreCompact..PostCompact) — Clawd sweeps up the mess.
+    "Compact": "sweep",
 }
 
 # If a mapped animation is missing (older sprites/ folder), fall back sensibly.

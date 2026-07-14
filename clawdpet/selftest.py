@@ -1979,6 +1979,66 @@ def run_selftest() -> int:
     # variant: announce 6 s, decide after the classic 15 s would NOT have
     # mattered — here we simply verify the script accepts and uses the ack)
     print("[selftest] telegram remote approval OK")
+    # --- W: window sitting (macOS) — fake provider, offscreen-safe --------
+    from . import macwindows
+    from .macwindows import frontmost_window_frame, window_tracking_available
+    assert isinstance(window_tracking_available(), bool)
+    _wlive = frontmost_window_frame()      # must never raise, Quartz or not
+    if sys.platform != "darwin":
+        assert _wlive is None, "window frames are a macOS-only feature"
+    if _wlive is not None:
+        assert len(_wlive) == 4 and _wlive[2] >= 200 and _wlive[3] >= 100
+    pet.enable_wander(False)               # a clean, idle pet for this block
+    pet.enable_cursor_chase(False)
+    pet._stop_throw()
+    pet.set_pct(10)
+    pet.set_activity(None)
+    wsav = pet._screen_avail()
+    wsx, wsy = wsav.left() + 60, wsav.top() + 320
+    ws_frame = [(wsx, wsy, 640, 400)]      # mutable: the test moves the window
+    pet._window_frame_provider = lambda: ws_frame[0]
+    pet.move(wsav.left() + 5, wsav.bottom() - pet.height())
+    pet.enable_window_sitting(True)        # anchors immediately via the tick
+    assert pet._window_sit_timer.isActive(), "sit poll timer not running"
+    assert pet._window_sitting, "pet did not anchor to the fake window"
+    assert pet.y() == wsy - pet.height(), "feet not on the window top edge"
+    assert wsx <= pet.x() <= wsx + 640 - pet.width(), "x not clamped to window"
+    # the window moves -> the pet follows on the next poll (dx/dy directly)
+    ws_frame[0] = (wsx + 48, wsy + 64, 640, 400)
+    _wpx = pet.x()
+    pet._window_sit_tick()
+    assert pet.y() == wsy + 64 - pet.height(), "did not follow the window down"
+    assert pet.x() == _wpx + 48, "did not follow the window sideways"
+    # the window disappears -> the pet FALLS via the throw physics
+    ws_frame[0] = None
+    pet._window_sit_tick()
+    assert pet._throw_active and not pet._window_sitting, \
+        "lost window must drop the pet"
+    pet._stop_throw()
+    pet._throw_timer.stop()
+    # chase priority: while a chase runs, sitting must not adjust anything
+    ws_frame[0] = (wsx, wsy, 640, 400)
+    pet._chase_state = "chase"
+    _wpy = pet.y()
+    pet._window_sit_tick()
+    assert pet.y() == _wpy and not pet._window_sitting, \
+        "sitting must never fight the cursor chase"
+    pet._chase_state = "wait"
+    # a fresh window re-anchors; disabling while sitting drops him again
+    pet._window_sit_tick()
+    assert pet._window_sitting
+    pet.enable_window_sitting(False)
+    assert not pet._window_sit_timer.isActive(), "sit timer still active"
+    assert pet._throw_active, "disabling while perched must start the drop"
+    pet._stop_throw()
+    pet._throw_timer.stop()
+    assert not pet._window_sitting and pet._sit_frame is None
+    pet._window_frame_provider = macwindows.frontmost_window_frame
+    # i18n: the menu key exists in BOTH languages
+    from .i18n import STRINGS as _wstrings
+    for _lang in ("de", "en"):
+        assert "menu_window_sit" in _wstrings[_lang], _lang
+    print("[selftest] window sitting OK")
 
     print("[selftest] OK")
     del app

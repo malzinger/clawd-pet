@@ -250,6 +250,8 @@ STRINGS = {
         "levelup_title": "Level {n}!",
         "levelup_text": "Clawd ist jetzt {title}.",
         "progress_line": "Level {n} · {title} · {xp} XP (nächstes: {nxt})",
+        # --- W: window sitting ---
+        "menu_window_sit": "Auf Fenstern sitzen",
     },
     "en": {
         "panel_title": "Plan usage limits · {plan}",
@@ -428,6 +430,8 @@ STRINGS = {
         "levelup_title": "Level {n}!",
         "levelup_text": "Clawd is now a {title}.",
         "progress_line": "Level {n} · {title} · {xp} XP (next: {nxt})",
+        # --- W: window sitting ---
+        "menu_window_sit": "Sit on windows",
     },
 }
 

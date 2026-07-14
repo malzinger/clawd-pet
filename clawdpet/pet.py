@@ -11,6 +11,7 @@ from PyQt5.QtCore import QElapsedTimer, QRect, QRectF, QSize, Qt, QTimer
 from PyQt5.QtGui import QColor, QCursor, QGuiApplication, QPainter, QPixmap, QRegion
 from PyQt5.QtWidgets import QWidget
 
+from . import macwindows
 from .art import ArtState, ClawdArt, SpriteSet
 from .config import (
     CELEBRATE_HOP_V,
@@ -34,6 +35,7 @@ from .config import (
     WANDER_SPEED_PX,
     WANDER_TICK_MS,
     WANDER_WALK_RANGE_S,
+    WINDOW_SIT_POLL_MS,
 )
 from .i18n import fmt_de, fmt_pct_de, tr
 from .moods import (
@@ -153,6 +155,16 @@ class PetWidget(QWidget):
         self._chase_timer.timeout.connect(self._chase_tick)
         self._generating = False       # Claude is generating -> typing-along bob
         self._celebrating = False
+
+        # W: window sitting (opt-in, macOS) — perch on the frontmost window.
+        # The provider is injectable so the selftest can feed fake frames.
+        self._window_sit_enabled = False
+        self._window_sitting = False   # currently anchored to a window top
+        self._sit_frame = None         # (x, y, w, h) of the anchor window
+        self._window_frame_provider = macwindows.frontmost_window_frame
+        self._window_sit_timer = QTimer(self)
+        self._window_sit_timer.setInterval(WINDOW_SIT_POLL_MS)
+        self._window_sit_timer.timeout.connect(self._window_sit_tick)
 
         self._anim_timer = QTimer(self)
         self._anim_timer.timeout.connect(self._tick)
@@ -660,6 +672,14 @@ class PetWidget(QWidget):
             return
         x = self.x() + step
         left, right = avail.left(), avail.right() - self.width()
+        if self._window_sitting and self._sit_frame is not None:
+            # window sitting (W) cooperates with wander: while perched, the
+            # walkable floor is the window's top edge, so turn at ITS borders
+            fx, _fy, fw, _fh = self._sit_frame
+            left = max(left, fx)
+            right = min(right, fx + fw - self.width())
+            if right < left:
+                right = left
         if x <= left:                    # turn around at the screen edges
             x, self._wander_dir = left, 1
         elif x >= right:
@@ -759,6 +779,91 @@ class PetWidget(QWidget):
         self.move(x, self.y())
         if self.owner:
             self.owner.pet_moved()
+
+    # -------------------------------------------------- window sitting (W)
+
+    def enable_window_sitting(self, on: bool):
+        """Opt-in Shimeji mode (macOS): Clawd perches on the top edge of the
+        frontmost window, follows it around and falls (throw physics) when it
+        disappears. The caller persists the setting and gates the menu entry
+        on macwindows.window_tracking_available().
+
+        Anchoring is a simple one-shot reposition: the poll tick snaps Clawd
+        onto the window top the first time he is idle — deliberately chosen
+        over walking there, because a robust cross-screen walk toward a
+        moving target is far more failure-prone than a single hop."""
+        self._window_sit_enabled = bool(on)
+        if self._window_sit_enabled:
+            self._window_sit_timer.start()
+            self._window_sit_tick()          # anchor now, not one poll later
+        else:
+            self._window_sit_timer.stop()
+            was_sitting = self._window_sitting
+            self._window_sitting = False
+            self._sit_frame = None
+            if was_sitting and not self._throw_active:
+                self._start_throw(0.0, 0.0)  # step off: gravity to the floor
+
+    def _window_sit_blocked(self) -> bool:
+        """Sitting yields to the same interactions wandering does — but NOT
+        to wandering itself: while anchored, the wander walk strolls along
+        the window's top edge (see _wander_tick). Chase is handled in the
+        tick, which skips entirely while a chase is running."""
+        return (self._press_global is not None          # mid-drag
+                or self.underMouse()                    # cursor on Clawd
+                or (self.owner is not None
+                    and self.owner.panel.isVisible())   # panel open
+                or self._react_active                   # petting reaction
+                or self._throw_active                   # flying (F12)
+                or self._activity is not None           # visibly working
+                or self._generating                     # typing along
+                or self._quota_mood != "chill")         # alarmed or asleep
+
+    def _window_sit_tick(self):
+        if not self._window_sit_enabled:
+            return
+        if self._chase_state != "wait":
+            return                       # never fight the cursor chase (Y)
+        try:
+            frame = self._window_frame_provider()
+        except Exception:
+            frame = None                 # a provider bug must not kill the tick
+        if self._window_sit_blocked():
+            # drag/throw/work suspends sitting; it re-anchors once idle again
+            self._window_sitting = False
+            self._sit_frame = None
+            return
+        if frame is None:                # perch is gone -> fall to the floor
+            if self._window_sitting:
+                self._window_sitting = False
+                self._sit_frame = None
+                self._start_throw(0.0, 0.0)
+            return
+        fx, fy, fw, _fh = frame
+        avail = self._screen_avail()
+        left = max(avail.left(), fx)
+        right = min(avail.right() - self.width(), fx + fw - self.width())
+        if right < left:                 # window shrank away under the pet
+            if self._window_sitting:
+                self._window_sitting = False
+                self._sit_frame = None
+                self._start_throw(0.0, 0.0)
+            return
+        # feet on the window top; clamped to the screen so a window whose
+        # title bar hugs the menu bar never pushes the sprite off-screen
+        y = max(avail.top(), fy - self.height())
+        if self._window_sitting and self._sit_frame is not None:
+            x = self.x() + (fx - self._sit_frame[0])   # follow a moving window
+        else:
+            x = self.x()                 # first anchor: hop straight onto it
+        x = max(left, min(x, right))
+        if (x, y) != (self.x(), self.y()):
+            self._mark_active()
+            self.move(x, y)
+            if self.owner:
+                self.owner.pet_moved()
+        self._window_sitting = True
+        self._sit_frame = frame
 
     # -------------------------------------------------- throw physics (F12)
 

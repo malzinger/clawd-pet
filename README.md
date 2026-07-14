@@ -148,6 +148,10 @@ calibration), `api` (read-only live sync), `activity`/`hooks` (real time),
   says so (status page check, fail-open).
 - **Cursor chase (opt-in):** oneko-style — while idle Clawd occasionally
   chases your mouse cursor, catches it, and naps on it until it escapes.
+- **Sit on windows (opt-in, macOS):** shimeji-style — Clawd perches on
+  the frontmost window's title bar, strolls along it and follows the
+  window around; when it closes or moves away he tumbles to the floor.
+  Uses only window geometry (no screen-recording permission needed).
 - **Levels & evolution:** Clawd eats your tokens — XP accumulates into
   levels and evolution titles (Hatchling → Crabling → … → Legend), shown
   in the panel; level-ups earn a celebration hop. No neglect mechanics.

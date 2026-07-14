@@ -152,6 +152,10 @@ Paket `clawdpet/` — grob: `usage` (Log-Scan, 5-h-Fenster, Kalibrierung),
   Panel Bescheid (Status-Page-Check, fail-open).
 - **Cursorjagd (opt-in):** oneko-Style — im Leerlauf jagt Clawd gelegentlich
   den Mauszeiger, fängt ihn und schläft darauf ein, bis er entkommt.
+- **Auf Fenstern sitzen (opt-in, macOS):** Shimeji-Style — Clawd setzt
+  sich auf die Titelleiste des aktiven Fensters, spaziert darauf herum
+  und folgt dem Fenster; verschwindet es, purzelt er zu Boden. Nutzt nur
+  Fenster-Geometrie (keine Bildschirmaufnahme-Berechtigung nötig).
 - **Level & Evolution:** Clawd frisst deine Tokens — XP sammeln sich zu
   Leveln und Evolutions-Titeln (Hatchling → Crabling → … → Legend) im
   Panel; Level-ups gibt es mit Jubel-Hüpfer. Keine Vernachlässigungs-Strafen.

@@ -79,6 +79,7 @@ from .config import (
 from .focus import focus_terminal
 from .history import HistoryStore
 from .macdock import hide_dock_icon
+from .macwindows import window_tracking_available
 from .hooks import (
     ensure_hook_token,
     hook_command,
@@ -217,6 +218,7 @@ class ClawdApp:
         self.wander = self.settings.value("wander", False, type=bool)
         self.click_through = self.settings.value("click_through", False, type=bool)
         self.cursor_chase = self.settings.value("cursor_chase", False, type=bool)
+        self.window_sit = self.settings.value("window_sit", False, type=bool)
         self._was_sick = False           # Anthropic incident edge detection
         # burn-rate history and last pct are kept PER SOURCE ("api"/"logs"):
         # the two modes report on different absolute scales, so cross-comparing
@@ -309,6 +311,8 @@ class ClawdApp:
         self.pet.enable_wander(self.wander)          # F5 (opt-in)
         self.pet.set_click_through(self.click_through)   # F8 (opt-in)
         self.pet.enable_cursor_chase(self.cursor_chase)  # Y (opt-in)
+        if self.window_sit and window_tracking_available():
+            self.pet.enable_window_sitting(True)         # W (opt-in)
 
     # -------------------------------------------------- lifecycle
 
@@ -496,6 +500,13 @@ class ClawdApp:
         act_chase.setChecked(self.cursor_chase)
         act_chase.triggered.connect(self.toggle_cursor_chase)
         menu.addAction(act_chase)
+
+        if window_tracking_available():                 # W: shimeji mode
+            act_sit = QAction(tr("menu_window_sit"), menu)
+            act_sit.setCheckable(True)
+            act_sit.setChecked(self.window_sit)
+            act_sit.triggered.connect(self.toggle_window_sit)
+            menu.addAction(act_sit)
 
         size_menu = menu.addMenu(tr("menu_size"))    # F2: S / M / L presets
         size_group = QActionGroup(size_menu)
@@ -928,6 +939,11 @@ class ClawdApp:
         self.settings.setValue("wander", self.wander)
         self.pet.enable_wander(self.wander)
         self._rebuild_tray_menu()
+
+    def toggle_window_sit(self):
+        self.window_sit = not self.window_sit
+        self.settings.setValue("window_sit", self.window_sit)
+        self.pet.enable_window_sitting(self.window_sit)
 
     def toggle_cursor_chase(self):
         self.cursor_chase = not self.cursor_chase

@@ -76,6 +76,11 @@ from .hooks import (
     unregister_permission_hook,
 )
 from .permission_bubble import PermissionBubble
+from .statusline import (
+    register_statusline,
+    statusline_registered,
+    unregister_statusline,
+)
 from .i18n import (
     fmt_de,
     fmt_pct_de,
@@ -188,6 +193,12 @@ class ClawdApp:
         self._work_log = None             # which session log that phase belongs to
         self._last_alert_mono = 0.0       # rate-limit "your turn" alerts
         self._hook_hold_until = 0.0
+        # X2: hook-driven state — running subagents (juggle while > 0), an
+        # active context compaction (sweep), and the latest context-window
+        # fill reported by the statusline sender (clawd_statusline.py)
+        self._subagent_count = 0
+        self._compacting = False
+        self._context_pct: Optional[float] = None
         self._activity_timer = QTimer()
         self._activity_timer.setInterval(ACTIVITY_POLL_MS)
         self._activity_timer.timeout.connect(self._check_activity)
@@ -354,6 +365,14 @@ class ClawdApp:
             act_perm = QAction(tr("menu_perm_on"), menu)
             act_perm.triggered.connect(self.enable_permission_bubble)
         menu.addAction(act_perm)
+
+        if statusline_registered(CLAUDE_SETTINGS_FILE):
+            act_sline = QAction(tr("menu_statusline_off"), menu)
+            act_sline.triggered.connect(self.disable_statusline)
+        else:
+            act_sline = QAction(tr("menu_statusline_on"), menu)
+            act_sline.triggered.connect(self.enable_statusline)
+        menu.addAction(act_sline)
 
         act_cal = QAction(tr("menu_cal"), menu)
         act_cal.triggered.connect(self.calibrate)
@@ -581,8 +600,11 @@ class ClawdApp:
             if event is None:
                 continue
             query = event.get("clawd_permission")
+            status = event.get("clawd_statusline")
             if isinstance(query, dict):
                 self._handle_permission_query(query, host, port)
+            elif isinstance(status, dict):
+                self._handle_statusline(status)
             else:
                 self._handle_hook_event(event)
 
@@ -618,6 +640,7 @@ class ClawdApp:
     def _handle_hook_event(self, event: dict):
         name = event.get("hook_event_name") or ""
         act = None
+        clear_act = False       # explicit "back to idle" (act stays None)
         text = None
         if name == "PreToolUse":
             act = ("working", event.get("tool_name"))
@@ -628,15 +651,53 @@ class ClawdApp:
             self._fire_alert(tr("notify_input_title"), tr("notify_input_text"))
         elif name in ("Stop", "TaskCompleted"):
             act = ("waiting", None)
-        elif name == "PostToolUseFailure":
-            act = ("error", None)
+            self._subagent_count = 0
+            self._compacting = False
+        elif name in ("SubagentStart", "SubagentStop"):
+            # X2: while subagents run, Clawd juggles them ("Task" maps to the
+            # juggle mood via moods.TOOL_MOODS); the count never goes below 0
+            if name == "SubagentStart":
+                self._subagent_count += 1
+            else:
+                self._subagent_count = max(0, self._subagent_count - 1)
+            if self._subagent_count > 0:
+                act = ("working", "Task")
+            else:
+                clear_act = True
+        elif name in ("PostToolUseFailure", "StopFailure"):
+            # X2: a failure startles the pet — no toast (too noisy), and under
+            # do-not-disturb nothing happens at all
+            if self.dnd:
+                return
+            self.pet._startle()          # 30 s cooldown handled by the pet
+            act = ("error", None)        # brief grumpy/panic look
             QTimer.singleShot(5000, self._clear_error_state)
+        elif name == "PreCompact":
+            # X2: sweeping up while Claude Code compacts the context
+            self._compacting = True
+            act = ("working", "Compact")
+            text = tr("bubble_compact")
+        elif name == "PostCompact":
+            self._compacting = False
+            if self._subagent_count > 0:
+                act = ("working", "Task")   # subagents still running -> juggle
+            else:
+                clear_act = True
         elif name == "SessionStart":
+            self._subagent_count = 0
+            self._compacting = False
             text = tr("bubble_session")
+        elif name == "SessionEnd":
+            # X2: session gone — clear any hook-driven activity state (like
+            # Stop does) and release the mood hold for other live sessions
+            self._subagent_count = 0
+            self._compacting = False
+            clear_act = True
         else:
-            return
-        self._hook_hold_until = time.monotonic() + 15.0
-        if act is not None:
+            return                       # unknown/old events: ignore gracefully
+        self._hook_hold_until = (0.0 if name == "SessionEnd"
+                                 else time.monotonic() + 15.0)
+        if act is not None or clear_act:
             self._last_activity = act
             self.pet.set_activity(act)
         if text and not self.quiet and not self.dnd and self.pet.isVisible():
@@ -861,6 +922,42 @@ class ClawdApp:
         unregister_permission_hook(CLAUDE_SETTINGS_FILE)
         self.perm_bubble.decide("pass")
         self._rebuild_tray_menu()
+
+    # ------------------------------------------- statusline (X2)
+
+    def enable_statusline(self):
+        command = hook_command("clawd_statusline.py")
+        if not command:
+            QMessageBox.warning(
+                None, tr("hooks_py_title"), tr("hooks_py_text"))
+            return
+        if register_statusline(CLAUDE_SETTINGS_FILE, command):
+            QMessageBox.information(
+                None, tr("statusline_on_title"),
+                tr("statusline_on_text",
+                   f=f"{CLAUDE_SETTINGS_FILE.name}.clawd-bak"))
+        elif not statusline_registered(CLAUDE_SETTINGS_FILE):
+            # a statusline the user configured themselves — never overwritten
+            QMessageBox.warning(
+                None, tr("statusline_foreign_title"),
+                tr("statusline_foreign_text"))
+        self._rebuild_tray_menu()
+
+    def disable_statusline(self):
+        unregister_statusline(CLAUDE_SETTINGS_FILE)
+        self._rebuild_tray_menu()
+
+    def _handle_statusline(self, payload: dict):
+        """Latest context-window fill from clawd_statusline.py via UDP."""
+        try:
+            pct = float(payload.get("context_pct"))
+        except (TypeError, ValueError):
+            return
+        pct = max(0.0, min(100.0, pct))
+        model = payload.get("model")
+        model = model.strip() if isinstance(model, str) and model.strip() else None
+        self._context_pct = pct
+        self.panel.set_context(pct, model)
 
     # -------------------------------------------------- calibration
 

@@ -184,9 +184,12 @@ def refresh_hook_copy() -> None:
     in the repo and updates together with the app — nothing to do."""
     if not getattr(sys, "frozen", False):
         return
+    # deferred import: statusline.py imports the settings helpers from here
+    from .statusline import statusline_registered
     for script, registered in (
             ("clawd_hook.py", hooks_registered),
-            ("clawd_permission_hook.py", permission_hook_registered)):
+            ("clawd_permission_hook.py", permission_hook_registered),
+            ("clawd_statusline.py", statusline_registered)):
         if not registered(CLAUDE_SETTINGS_FILE):
             continue
         src = Path(getattr(sys, "_MEIPASS", "")) / script

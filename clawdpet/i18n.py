@@ -202,6 +202,20 @@ STRINGS = {
         # --- live-status line (usage accuracy fixes) ---
         "src_uncalibrated": "lokal – unkalibriert, grobe Werte",
         "src_rate_limited": "Live-Sync pausiert bis {t} (Rate-Limit)",
+        # --- X2: hook events + statusline ---
+        "bubble_compact": "Ich räume den Kontext auf …",
+        "menu_statusline_on": "Kontext-Anzeige aktivieren",
+        "menu_statusline_off": "Kontext-Anzeige deaktivieren",
+        "statusline_on_title": "Kontext-Anzeige aktiviert",
+        "statusline_on_text": "Claude Code zeigt ab sofort Clawds Statuszeile mit "
+                              "dem Kontext-Füllstand;\ndas Panel zeigt den Wert "
+                              "live an.\n\nBackup der Einstellungen: {f}",
+        "statusline_foreign_title": "Eigene Statuszeile erkannt",
+        "statusline_foreign_text": "In den Claude-Code-Einstellungen ist bereits "
+                                   "eine eigene Statuszeile konfiguriert.\nClawd "
+                                   "überschreibt sie nicht — bitte zuerst manuell "
+                                   "entfernen.",
+        "row_context": "Kontext-Fenster",
     },
     "en": {
         "panel_title": "Plan usage limits · {plan}",
@@ -334,6 +348,19 @@ STRINGS = {
         # --- live-status line (usage accuracy fixes) ---
         "src_uncalibrated": "local – uncalibrated, rough numbers",
         "src_rate_limited": "live sync paused until {t} (rate limited)",
+        # --- X2: hook events + statusline ---
+        "bubble_compact": "Compacting context …",
+        "menu_statusline_on": "Enable context display",
+        "menu_statusline_off": "Disable context display",
+        "statusline_on_title": "Context display enabled",
+        "statusline_on_text": "Claude Code now shows Clawd's status line with the "
+                              "context-window fill;\nthe panel shows the value "
+                              "live.\n\nSettings backup: {f}",
+        "statusline_foreign_title": "Custom status line detected",
+        "statusline_foreign_text": "Your Claude Code settings already contain a "
+                                   "custom status line.\nClawd will not overwrite "
+                                   "it — please remove it manually first.",
+        "row_context": "Context window",
     },
 }
 

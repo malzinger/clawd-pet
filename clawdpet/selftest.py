@@ -168,6 +168,11 @@ def run_selftest() -> int:
     print("[selftest] previews written: panel_preview_api.png, panel_preview_logs.png")
 
     # calibration: budget derived from Claude's own percentage
+    # X2 fix: a live pet may have persisted an auto-calibration in
+    # ~/.clawd/calibration.json — this block (and line 204 below) already
+    # overwrites/reset that state anyway, so clear it up front to make the
+    # baseline assertion hold on machines with a live installation too.
+    reset_auto_calibration()
     assert effective_max_tokens() == MAX_TOKENS and not is_calibrated()
     set_max_tokens_override(int(round(178_000 / 0.65)))
     assert is_calibrated() and effective_max_tokens() == 273_846
@@ -1218,6 +1223,215 @@ def run_selftest() -> int:
     assert post_notification("t", "x") is False        # env kill-switch works
     assert _applescript_str('a"b\\c') == '"a\\"b\\\\c"'
     print("[selftest] native notify OK")
+
+    # --- X2: hook events + statusline ---
+    from .config import CONTEXT_STALE_S, HOOK_EVENTS
+    from .statusline import (register_statusline, statusline_registered,
+                             unregister_statusline)
+
+    # 1) new events registered + register/unregister round-trip stays idempotent
+    x2_new_events = ("SubagentStart", "SubagentStop", "PostToolUseFailure",
+                     "StopFailure", "PreCompact", "PostCompact", "SessionEnd")
+    for _ev in x2_new_events:
+        assert _ev in HOOK_EVENTS, f"{_ev} missing from HOOK_EVENTS"
+    with tempfile.TemporaryDirectory() as td:
+        sp = Path(td) / "settings.json"
+        sp.write_text("{}", encoding="utf-8")
+        assert register_hooks(sp, 'py "clawd_hook.py"')
+        assert not register_hooks(sp, 'py "clawd_hook.py"'), \
+            "double hook registration not idempotent"
+        x2_data = json.loads(sp.read_text(encoding="utf-8"))
+        for _ev in HOOK_EVENTS:
+            assert len(x2_data["hooks"][_ev]) == 1, f"event {_ev} not registered"
+        assert unregister_hooks(sp)
+        assert not hooks_registered(sp)
+        x2_data = json.loads(sp.read_text(encoding="utf-8"))
+        assert all(arr == [] for arr in x2_data["hooks"].values()), \
+            "unregister left clawd entries behind"
+    print("[selftest] X2 new hook events + idempotent registration OK")
+
+    # 2/3) app handler: subagent counter, failure startle, compaction bubble
+    x2_saved = (capp.dnd, capp.quiet, capp._last_activity,
+                capp._hook_hold_until, capp.pet.pct, capp.pet._activity)
+    capp.dnd = False
+    capp.quiet = False
+    capp.pet.hide()                        # no bubbles while counting
+    capp.pet.set_pct(10)                   # calm quota -> tool mood visible
+    capp.pet.set_activity(None)
+    capp._last_activity = None
+    capp._subagent_count = 0
+    capp._handle_hook_event({"hook_event_name": "SubagentStart"})
+    assert capp._subagent_count == 1
+    assert capp._last_activity == ("working", "Task"), "subagent did not juggle"
+    if "juggle" in capp.pet._sprites.sprites:
+        assert capp.pet.mood == "juggle", f"subagent mood: {capp.pet.mood}"
+    capp._handle_hook_event({"hook_event_name": "SubagentStart"})
+    assert capp._subagent_count == 2
+    capp._handle_hook_event({"hook_event_name": "SubagentStop"})
+    assert capp._subagent_count == 1
+    assert capp._last_activity == ("working", "Task"), "juggle ended too early"
+    capp._handle_hook_event({"hook_event_name": "SubagentStop"})
+    assert capp._subagent_count == 0
+    assert capp._last_activity is None, "activity not cleared at count 0"
+    capp._handle_hook_event({"hook_event_name": "SubagentStop"})
+    assert capp._subagent_count == 0, "subagent count went below 0"
+    capp._handle_hook_event({"hook_event_name": "SubagentStart"})
+    capp._handle_hook_event({"hook_event_name": "SessionStart"})
+    assert capp._subagent_count == 0, "SessionStart did not reset the count"
+    capp._handle_hook_event({"hook_event_name": "SubagentStart"})
+    capp._handle_hook_event({"hook_event_name": "Stop"})
+    assert capp._subagent_count == 0, "Stop did not reset the count"
+    capp._handle_hook_event({"hook_event_name": "SubagentStart"})
+    capp._handle_hook_event({"hook_event_name": "SessionEnd"})
+    assert capp._subagent_count == 0, "SessionEnd did not reset the count"
+    assert capp._last_activity is None, "SessionEnd left activity behind"
+    assert capp._hook_hold_until == 0.0, "SessionEnd kept the mood hold"
+    # old/unknown events (old clawd_hook.py copies) are ignored gracefully
+    capp._handle_hook_event({"hook_event_name": "SomeFutureEvent"})
+    capp._handle_hook_event({})
+    assert capp._last_activity is None and capp._subagent_count == 0
+
+    # failure events: startle path must not raise, activity goes "error"
+    capp._handle_hook_event({"hook_event_name": "PostToolUseFailure"})
+    assert capp._last_activity == ("error", None), "failure not grumpy"
+    if "panic" in capp.pet._sprites.sprites:
+        assert capp.pet.mood == "panic"
+    capp._clear_error_state()
+    assert capp._last_activity is None
+    capp._handle_hook_event({"hook_event_name": "StopFailure"})
+    assert capp._last_activity == ("error", None), "StopFailure not handled"
+    capp._clear_error_state()
+    capp.dnd = True                        # DND: failures do nothing at all
+    capp._handle_hook_event({"hook_event_name": "PostToolUseFailure"})
+    assert capp._last_activity is None, "failure reacted under DND"
+    capp.dnd = False
+
+    # PreCompact shows the bubble + sweeps, PostCompact ends it
+    capp.pet.show()
+    capp._handle_hook_event({"hook_event_name": "PreCompact"})
+    assert capp._compacting is True
+    assert capp._last_activity == ("working", "Compact")
+    if "sweep" in capp.pet._sprites.sprites:
+        assert capp.pet.mood == "sweep", f"compact mood: {capp.pet.mood}"
+    assert capp.bubble.isVisible(), "compact bubble not shown"
+    assert capp.bubble._text == tr("bubble_compact")
+    capp._handle_hook_event({"hook_event_name": "PostCompact"})
+    assert capp._compacting is False
+    assert capp._last_activity is None, "PostCompact did not end the sweep"
+    # compaction while subagents run: PostCompact goes back to juggling
+    capp._handle_hook_event({"hook_event_name": "SubagentStart"})
+    capp._handle_hook_event({"hook_event_name": "PreCompact"})
+    capp._handle_hook_event({"hook_event_name": "PostCompact"})
+    assert capp._last_activity == ("working", "Task"), "juggle lost after compact"
+    capp._handle_hook_event({"hook_event_name": "SessionEnd"})
+    capp.bubble.hide()
+    capp.pet.hide()
+    capp.pet.set_activity(None)
+    (capp.dnd, capp.quiet, capp._last_activity,
+     capp._hook_hold_until, _x2_pct, _x2_act) = x2_saved
+    capp.pet.set_pct(_x2_pct)
+    capp.pet.set_activity(_x2_act)
+    print("[selftest] X2 subagent counter + failure/compact events OK")
+
+    # 4) statusline registration: never clobber a user's own statusline
+    with tempfile.TemporaryDirectory() as td:
+        sp = Path(td) / "settings.json"
+        sl_cmd = 'py "clawd_statusline.py"'
+        sp.write_text("{}", encoding="utf-8")
+        assert not statusline_registered(sp)
+        assert register_statusline(sp, sl_cmd)              # absent -> ours
+        assert statusline_registered(sp)
+        x2_sl = json.loads(sp.read_text(encoding="utf-8"))["statusLine"]
+        assert x2_sl == {"type": "command", "command": sl_cmd}
+        assert not register_statusline(sp, sl_cmd), \
+            "re-registering our statusline should be a no-op"
+        assert unregister_statusline(sp)                    # removes only ours
+        assert "statusLine" not in json.loads(sp.read_text(encoding="utf-8"))
+        assert not unregister_statusline(sp), "double unregister changed settings"
+        foreign = {"statusLine": {"type": "command", "command": "my-own-status"},
+                   "other": 1}
+        sp.write_text(json.dumps(foreign), encoding="utf-8")
+        assert not register_statusline(sp, sl_cmd), \
+            "a foreign statusline was overwritten"
+        assert not statusline_registered(sp)
+        assert not unregister_statusline(sp), "foreign statusline removed"
+        assert json.loads(sp.read_text(encoding="utf-8")) == foreign, \
+            "foreign settings not left untouched"
+    print("[selftest] X2 statusline registration OK")
+
+    # 5) clawd_statusline.py end-to-end: stdout line + authenticated datagram
+    sl_py = Path(__file__).resolve().parent.parent / "clawd_statusline.py"
+    with tempfile.TemporaryDirectory() as td:
+        tokf = Path(td) / "hook_token"
+        tok = ensure_hook_token(tokf)
+        probe = socket_mod.socket(socket_mod.AF_INET, socket_mod.SOCK_DGRAM)
+        probe.bind(("127.0.0.1", 0))
+        probe.settimeout(5.0)
+        env = dict(os.environ,
+                   CLAWD_PET_PORT=str(probe.getsockname()[1]),
+                   CLAWD_TOKEN_FILE=str(tokf))
+        sl_payload = json.dumps({
+            "session_id": "x2-session",
+            "model": {"id": "claude-sonnet-4", "display_name": "Sonnet 4"},
+            "context_window": {"used_percentage": 42.5},
+        })
+        proc = subprocess.run([sys.executable, str(sl_py)],
+                              input=sl_payload.encode("utf-8"),
+                              stdout=subprocess.PIPE, env=env, timeout=10)
+        assert proc.returncode == 0
+        sl_out = proc.stdout.decode("utf-8", errors="replace")
+        assert "42" in sl_out, f"statusline output lacks the pct: {sl_out!r}"
+        raw, _ = probe.recvfrom(65535)
+        ev = parse_hook_datagram(raw, tok)
+        assert ev and isinstance(ev.get("clawd_statusline"), dict), ev
+        assert ev["clawd_statusline"]["context_pct"] == 42.5
+        assert ev["clawd_statusline"]["model"] == "Sonnet 4"
+        assert ev["clawd_statusline"]["session_id"] == "x2-session"
+        # broken stdin: still prints a line, exits 0, sends nothing
+        proc2 = subprocess.run([sys.executable, str(sl_py)],
+                               input=b"{not json", stdout=subprocess.PIPE,
+                               env=env, timeout=10)
+        assert proc2.returncode == 0 and proc2.stdout.strip(), \
+            "statusline must always print something"
+        probe.settimeout(0.3)
+        try:
+            probe.recvfrom(65535)
+            raise AssertionError("broken payload still sent a datagram")
+        except socket_mod.timeout:
+            pass
+        probe.close()
+    print("[selftest] X2 statusline sender e2e OK")
+
+    # 6) panel context row shows fresh values, hides on unknown/stale
+    panel.set_context(63.0, "Sonnet 4")
+    panel.update_snapshot(snap)            # must survive _show_only
+    app.processEvents()
+    x2_row = panel._rows.get("context")
+    assert x2_row is not None, "context row not created"
+    assert not x2_row["name"].isHidden() and not x2_row["bar"].isHidden()
+    assert "63" in x2_row["pct"].text(), x2_row["pct"].text()
+    assert x2_row["reset"].text() == "Sonnet 4"
+    panel.set_context(70.0, None)          # no model -> single compact row
+    assert x2_row["reset"].isHidden(), "empty model line still visible"
+    panel.set_context(None)                # unknown -> hidden
+    assert x2_row["name"].isHidden() and x2_row["bar"].isHidden()
+    panel.set_context(50.0, "Opus")
+    assert not x2_row["name"].isHidden()
+    panel._ctx_ts = time.monotonic() - (CONTEXT_STALE_S + 1)   # went stale
+    panel._refresh_countdown()
+    assert x2_row["name"].isHidden(), "stale context row still shown"
+    panel.set_context(None)
+    # app routing: the datagram payload lands in the panel via the setter
+    capp._handle_statusline({"context_pct": 33.0, "model": "Opus",
+                             "session_id": "s"})
+    assert capp._context_pct == 33.0
+    assert capp.panel._ctx_pct == 33.0 and capp.panel._ctx_model == "Opus"
+    capp._handle_statusline({"context_pct": "garbage"})        # ignored
+    assert capp._context_pct == 33.0
+    capp._handle_statusline({"context_pct": 250.0})            # clamped
+    assert capp._context_pct == 100.0
+    capp.panel.set_context(None)
+    print("[selftest] X2 panel context row OK")
 
     print("[selftest] OK")
     del app

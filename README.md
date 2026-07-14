@@ -34,7 +34,7 @@ Build the standalone exe yourself:
 
 ```bash
 pip install pyinstaller
-python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ico" --add-data "sprites;sprites" --add-data "sounds;sounds" --add-data "clawd_hook.py;." --add-data "clawd_permission_hook.py;." clawd_pet.py
+python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ico" --add-data "sprites;sprites" --add-data "sounds;sounds" --add-data "clawd_hook.py;." --add-data "clawd_permission_hook.py;." --add-data "clawd_statusline.py;." --add-data "codex_notify.py;." clawd_pet.py
 ```
 
 ## Code layout

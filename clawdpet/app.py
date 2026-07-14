@@ -1054,6 +1054,17 @@ class ClawdApp:
         from .hooks import _hook_runner
         runner = _hook_runner()
         script = Path(__file__).resolve().parent.parent / "codex_notify.py"
+        if getattr(sys, "frozen", False):
+            # the bundle payload dir is temporary — config.toml needs a path
+            # that survives, so the sender is copied next to our other state
+            src = Path(getattr(sys, "_MEIPASS", "")) / "codex_notify.py"
+            script = Path.home() / ".clawd" / "codex_notify.py"
+            try:
+                script.parent.mkdir(parents=True, exist_ok=True)
+                import shutil as _sh
+                _sh.copy2(src, script)
+            except OSError:
+                return
         if not runner or not script.is_file():
             return
         line = codex_notify_command(runner, script)

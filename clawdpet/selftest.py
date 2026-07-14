@@ -2067,8 +2067,18 @@ def run_selftest() -> int:
     pet.set_activity(("working", "Edit"))             # Claude works ...
     assert not pet._window_sit_blocked(), \
         "sitting on a window must survive Claude working"
+    assert pet._chase_blocked(), "chase yields while Claude works"
+    pet.set_activity(("waiting", None))               # ... Claude waits ...
+    assert not pet._chase_blocked(), \
+        "a WAITING Claude must not block the chase — that is when the user's cursor moves"
+    pet._chase_state = "chase"
+    pet._update_mood()
+    if "carry" in pet._sprites.sprites:
+        assert pet.mood == "carry", "chase gait must show during 'happy' mood"
+    pet._chase_state = "wait"
     pet.set_activity(None)
     pet.set_pct(10)
+    pet._update_mood()
     # progress line is always visible now (level 0 is a valid state)
     from . import progress as progress_mod
     st_bk = (progress_mod.STATE_FILE, progress_mod._state_loaded,

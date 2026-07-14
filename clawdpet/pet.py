@@ -334,7 +334,7 @@ class PetWidget(QWidget):
                 mood = "happy"
             elif kind == "error":
                 mood = "panic"
-        if mood in ("chill", "focus"):
+        if mood in ("chill", "focus", "happy"):
             if self._chase_state == "caught":
                 mood = "sleep"                     # napping on the caught cursor
             elif (((self._wander_enabled and self._wander_state == "walk")
@@ -732,7 +732,10 @@ class PetWidget(QWidget):
                     and self.owner.panel.isVisible())
                 or self._react_active
                 or self._throw_active
-                or self._activity is not None
+                # a WAITING Claude is the perfect chase moment (the user's
+                # cursor is the one moving); only real work blocks
+                or (self._activity is not None
+                    and self._activity[0] != "waiting")
                 or self._generating
                 or not self._calm_enough()
                 or (self._wander_enabled and self._wander_state == "walk"))
@@ -756,18 +759,26 @@ class PetWidget(QWidget):
                 self._mark_active()
                 self._update_mood()                  # walk cycle on
             return
-        # state "chase": scuttle horizontally toward the cursor
+        # state "chase": scuttle horizontally toward the cursor. The pet
+        # walks across the whole VIRTUAL desktop (multi-monitor), catching
+        # only once it shares a screen with the cursor.
         target = self._chase_target_pos()
         avail = self._screen_avail()
-        if not avail.contains(target):               # cursor left this screen
+        virt = QRect()
+        for scr in QGuiApplication.screens():
+            virt = virt.united(scr.availableGeometry())
+        if not virt.contains(target):                # cursor truly gone
             self._chase_rearm(now)
             return
         cx = self.x() + self.width() // 2
         dx = target.x() - cx
         catch_px = self.width() // 2 + CHASE_STOP_SHORT_PX
         if abs(dx) <= catch_px:
-            self._chase_state = "caught"             # gotcha — nap on it
-            self._update_mood()
+            if avail.contains(target):
+                self._chase_state = "caught"         # gotcha — nap on it
+                self._update_mood()
+            else:
+                self._chase_rearm(now)               # right column, other screen
             return
         direction = 1 if dx > 0 else -1
         self._chase_carry += CHASE_SPEED_PX * direction
@@ -775,7 +786,7 @@ class PetWidget(QWidget):
         self._chase_carry -= step
         if step == 0:
             return
-        left, right = avail.left(), avail.right() - self.width()
+        left, right = virt.left(), virt.right() - self.width()
         x = max(left, min(self.x() + step, right))
         if x == self.x():                            # pinned at a screen edge
             self._chase_rearm(now)

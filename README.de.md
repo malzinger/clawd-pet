@@ -76,13 +76,15 @@ Paket `clawdpet/` — grob: `usage` (Log-Scan, 5-h-Fenster, Kalibrierung),
   zeigt eine Benachrichtigung, wenn Claude auf dich wartet. Wenn er nichts zu
   tun hat, spielt er ab und zu eine zufällige Animation (jonglieren, fegen,
   dirigieren …), und wenn du ihn zu oft streichelst, wird er genervt.
-- **Live-Sync (exakte Zahlen), read-only:** Clawd liest das OAuth-Token, das
-  Claude Code ohnehin gespeichert hat, und zeigt exakt die Auslastung aus
-  Claudes eigenem `/usage`-Popup — alle paar Sekunden aktualisiert. Clawd
-  erneuert oder schreibt das Token nie (ein passiver Monitor darf Claude Codes
-  rotierenden Login nicht anfassen): Solange das Token gültig ist, siehst du
-  exakte Zahlen; ist es abgelaufen, nutzt Clawd die Schätzung — kalibriert aus
-  der letzten Live-Messung, sodass sie nah dran bleibt.
+- **Live-Sync (exakte Zahlen):** Clawd zeigt exakt die Auslastung aus Claudes
+  eigenem `/usage`-Popup, alle paar Sekunden aktualisiert. Richte einmalig
+  **Clawds eigenen Login** ein (Tray-Menü → „Clawd-Login einrichten …") — dann
+  hält Clawd ein **separates, selbst-erneuerndes** OAuth-Token in
+  `~/.clawd/auth.json` für dauerhaft exakte Zahlen. Das ist eine eigene
+  Anmeldung (wie ein drittes Gerät), die Claude Codes Login **nie** anfasst; das
+  Erneuern kann dich also nicht aus Claude Code aussperren. Ohne diesen Login
+  liest Clawd Claude Codes Token **read-only** (erneuert/schreibt die geteilte
+  Datei nie) und nutzt sonst die kalibrierte Schätzung.
 - **Selbst-kalibrierend (Fallback):** Ist der Live-Sync nicht verfügbar,
   Rechtsklick → „Limit kalibrieren …" und den Prozentwert aus Claudes
   eigenem `/usage`-Popup eintippen — die App leitet daraus dein echtes Budget ab.

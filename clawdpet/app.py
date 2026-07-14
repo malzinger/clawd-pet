@@ -29,7 +29,12 @@ from PyQt5.QtWidgets import (
 )
 
 from .activity import read_session_context
-from .api import collect_usage
+from .api import (
+    clawd_build_authorize_url,
+    clawd_exchange_code,
+    collect_usage,
+    force_live_refetch,
+)
 from .art import make_app_icon
 from .autostart import autostart_enabled, autostart_supported, set_autostart
 from .bubble import SpeechBubble
@@ -298,6 +303,10 @@ class ClawdApp:
             act_reset = QAction(tr("menu_cal_reset"), menu)
             act_reset.triggered.connect(self.reset_calibration)
             menu.addAction(act_reset)
+
+        act_login = QAction(tr("menu_clawd_login"), menu)
+        act_login.triggered.connect(self.setup_clawd_login)
+        menu.addAction(act_login)
 
         act_lang = QAction(tr("menu_lang"), menu)
         act_lang.triggered.connect(self.toggle_language)
@@ -659,6 +668,36 @@ class ClawdApp:
         set_max_tokens_override(None)
         self._rebuild_tray_menu()
         self.refresh()
+
+    def setup_clawd_login(self):
+        """One-time login that gives Clawd its OWN independent usage token, so
+        live values keep working (auto-refreshed) without touching Claude Code's
+        credential store. Opens the browser, then takes the pasted code."""
+        url, verifier, redirect = clawd_build_authorize_url()
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+        raw, ok = QInputDialog.getText(
+            None, tr("clawd_login_title"),
+            tr("clawd_login_prompt") + "\n\n" + url)
+        if not ok:
+            return
+        if not raw.strip():
+            QMessageBox.warning(None, tr("clawd_login_title"),
+                                tr("clawd_login_nocode"))
+            return
+        try:
+            clawd_exchange_code(raw, verifier, redirect)
+        except Exception as e:      # noqa: BLE001 — surface any failure to the user
+            QMessageBox.warning(
+                None, tr("clawd_login_title"),
+                tr("clawd_login_fail", e=str(e)[:200]))
+            return
+        force_live_refetch()        # immediate live fetch with the new token
+        self.refresh()
+        QMessageBox.information(None, tr("clawd_login_title"),
+                                tr("clawd_login_ok"))
 
     # -------------------------------------------------- position memory
 

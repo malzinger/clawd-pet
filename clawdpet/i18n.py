@@ -162,6 +162,14 @@ STRINGS = {
         "notify_input_text": "Claude wartet auf deine Eingabe.",
         "menu_sound_on": "Benachrichtigungston aktivieren",
         "menu_sound_off": "Benachrichtigungston deaktivieren",
+        # --- Clawd's own login (v1.8 upstream port) ---
+        "menu_clawd_login": "Clawd-Login einrichten …",
+        "clawd_login_title": "Clawd-Login",
+        "clawd_login_prompt": "1. Im Browser einloggen und „Authorize“ klicken.\n"
+                              "2. Den angezeigten Code (xxx#yyy) hier einfügen:",
+        "clawd_login_ok": "Clawd-Login eingerichtet — Live-Werte sind aktiv.",
+        "clawd_login_fail": "Login fehlgeschlagen: {e}",
+        "clawd_login_nocode": "Kein Code eingegeben.",
     },
     "en": {
         "panel_title": "Plan usage limits · {plan}",
@@ -255,6 +263,14 @@ STRINGS = {
         "notify_input_text": "Claude is waiting for your input.",
         "menu_sound_on": "Enable notification sound",
         "menu_sound_off": "Disable notification sound",
+        # --- Clawd's own login (v1.8 upstream port) ---
+        "menu_clawd_login": "Set up Clawd login …",
+        "clawd_login_title": "Clawd login",
+        "clawd_login_prompt": "1. Sign in in the browser and click \"Authorize\".\n"
+                              "2. Paste the code shown (xxx#yyy) here:",
+        "clawd_login_ok": "Clawd login set up — live values are active.",
+        "clawd_login_fail": "Login failed: {e}",
+        "clawd_login_nocode": "No code entered.",
     },
 }
 

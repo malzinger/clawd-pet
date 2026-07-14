@@ -20,7 +20,6 @@ from .config import (
     CHASE_SPEED_PX,
     CHASE_STOP_SHORT_PX,
     CHASE_TICK_MS,
-    CHASE_WAIT_RANGE_S,
     PET_HEIGHT,
     THROTTLE_IDLE_S,
     THROTTLE_TICK_MS,
@@ -334,16 +333,17 @@ class PetWidget(QWidget):
                 mood = "happy"
             elif kind == "error":
                 mood = "panic"
-        if mood in ("chill", "focus"):
-            if self._chase_state == "caught":
-                mood = "sleep"                     # napping on the caught cursor
-            elif (((self._wander_enabled and self._wander_state == "walk")
-                    or self._chase_state == "chase")
-                    and "carry" in self._sprites.sprites):
-                # walking gait while wandering (F5) or chasing the cursor (Y):
-                # the carrying gif is the only one with a walk cycle
-                mood = "carry"
-            elif mood == "chill" and self._idle_variant:
+        if self._chase_state == "caught":
+            mood = "sleep"                         # napping on the caught cursor
+        elif (((self._wander_enabled and self._wander_state == "walk")
+                or self._chase_state == "chase")
+                and "carry" in self._sprites.sprites):
+            # walking gait while wandering (F5) or chasing (Y) — at ANY quota
+            # mood: a walking pet must show a walk cycle, the alarm look
+            # returns the moment it stands still
+            mood = "carry"
+        elif mood in ("chill", "focus", "happy"):
+            if mood == "chill" and self._idle_variant:
                 mood = self._idle_variant          # play the random idle flourish
         else:
             self._idle_variant = None              # left idle -> don't resume a stale one
@@ -626,12 +626,6 @@ class PetWidget(QWidget):
                 self.update()
         self._update_mood()                  # enter/leave the walking gait
 
-    def _calm_enough(self) -> bool:
-        """Motion features (wander, chase, sitting) used to require the pure
-        "chill" quota mood — which above 50 % usage simply never holds, so
-        they looked broken all day. Only real alarm states block now."""
-        return self._quota_mood in ("chill", "focus")
-
     def _wander_blocked(self) -> bool:
         """No autonomous movement while the user or Claude interacts."""
         return (self._press_global is not None          # mid-drag
@@ -642,7 +636,7 @@ class PetWidget(QWidget):
                 or self._throw_active                   # flying (F12)
                 or self._chase_state != "wait"          # chasing/napping (Y)
                 or self._activity is not None           # visibly working
-                or not self._calm_enough())             # alarmed or asleep
+                or self._quota_mood == "sleep")         # truly asleep stays put
 
     def _wander_tick(self):
         now = time.monotonic()
@@ -705,9 +699,10 @@ class PetWidget(QWidget):
         self._chase_enabled = bool(on)
         if self._chase_enabled:
             self._chase_state = "wait"
-            # first attempt comes quickly (the user just toggled it and is
-            # watching); every later wait uses the lazy 30-90 s range
-            self._chase_next = time.monotonic() + random.uniform(8.0, 20.0)
+            # oneko chases CONTINUOUSLY — the earlier "occasional attempts"
+            # design (30-90 s waits) plus blocking phases meant user and pet
+            # basically never met. _chase_next now only debounces re-entry.
+            self._chase_next = time.monotonic() + 1.0
             self._chase_timer.start()
         else:
             self._chase_timer.stop()
@@ -721,7 +716,7 @@ class PetWidget(QWidget):
 
     def _chase_rearm(self, now: float):
         self._chase_state = "wait"
-        self._chase_next = now + random.uniform(*CHASE_WAIT_RANGE_S)
+        self._chase_next = now + random.uniform(3.0, 8.0)   # short breather
         self._update_mood()
 
     def _chase_blocked(self) -> bool:
@@ -732,9 +727,14 @@ class PetWidget(QWidget):
                     and self.owner.panel.isVisible())
                 or self._react_active
                 or self._throw_active
-                or self._activity is not None
+                # a WAITING Claude is the perfect chase moment (the user's
+                # cursor is the one moving); only real work blocks
+                or (self._activity is not None
+                    and self._activity[0] != "waiting")
                 or self._generating
-                or not self._calm_enough()
+                # NO quota-mood gate: an explicitly enabled fun feature must
+                # not be overruled by mood politics — a 93 % day would
+                # otherwise hide it entirely (user report, three rounds)
                 or (self._wander_enabled and self._wander_state == "walk"))
 
     def _chase_tick(self):
@@ -750,24 +750,37 @@ class PetWidget(QWidget):
                 self._chase_rearm(now)
             return
         if self._chase_state == "wait":
-            if now >= self._chase_next:
+            # engage whenever the debounce passed AND the cursor is actually
+            # away — a cat next to the mouse just sits there
+            target = self._chase_target_pos()
+            cx = self.x() + self.width() // 2
+            if (now >= self._chase_next
+                    and abs(target.x() - cx) > CHASE_RELEASE_PX):
                 self._chase_state = "chase"
                 self._chase_carry = 0.0
                 self._mark_active()
                 self._update_mood()                  # walk cycle on
             return
-        # state "chase": scuttle horizontally toward the cursor
+        # state "chase": scuttle horizontally toward the cursor. The pet
+        # walks across the whole VIRTUAL desktop (multi-monitor), catching
+        # only once it shares a screen with the cursor.
         target = self._chase_target_pos()
         avail = self._screen_avail()
-        if not avail.contains(target):               # cursor left this screen
+        virt = QRect()
+        for scr in QGuiApplication.screens():
+            virt = virt.united(scr.availableGeometry())
+        if not virt.contains(target):                # cursor truly gone
             self._chase_rearm(now)
             return
         cx = self.x() + self.width() // 2
         dx = target.x() - cx
         catch_px = self.width() // 2 + CHASE_STOP_SHORT_PX
         if abs(dx) <= catch_px:
-            self._chase_state = "caught"             # gotcha — nap on it
-            self._update_mood()
+            if avail.contains(target):
+                self._chase_state = "caught"         # gotcha — nap on it
+                self._update_mood()
+            else:
+                self._chase_rearm(now)               # right column, other screen
             return
         direction = 1 if dx > 0 else -1
         self._chase_carry += CHASE_SPEED_PX * direction
@@ -775,7 +788,7 @@ class PetWidget(QWidget):
         self._chase_carry -= step
         if step == 0:
             return
-        left, right = avail.left(), avail.right() - self.width()
+        left, right = virt.left(), virt.right() - self.width()
         x = max(left, min(self.x() + step, right))
         if x == self.x():                            # pinned at a screen edge
             self._chase_rearm(now)

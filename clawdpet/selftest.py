@@ -1468,6 +1468,12 @@ def run_selftest() -> int:
     pet.enable_cursor_chase(True)
     avail = pet._screen_avail()
     pet.move(avail.left() + 10, avail.center().y())  # room to walk right
+    # a cursor right next to the pet must NOT trigger a chase (oneko sits)
+    pet._chase_test_target = QPoint(pet.x() + pet.width() // 2 + 10,
+                                    avail.center().y())
+    pet._chase_next = 0.0
+    pet._chase_tick()
+    assert pet._chase_state == "wait", "nearby cursor must not start a chase"
     start_x = pet.x()
     pet._chase_test_target = QPoint(pet.x() + pet.width() // 2 + 400,
                                     avail.center().y())
@@ -2058,17 +2064,32 @@ def run_selftest() -> int:
     pet.set_generating(False)
     pet.set_pct(60)                                   # "focus" quota mood
     assert pet._quota_mood == "focus", pet._quota_mood
-    assert pet._calm_enough(), "focus is calm enough for motion features"
     assert not pet._chase_blocked(), "chase must work at 60 % usage"
-    pet.set_pct(90)                                   # "panic" still blocks
-    assert not pet._calm_enough()
-    assert pet._chase_blocked()
+    pet.set_pct(93)                                   # panic must NOT block:
+    assert pet._quota_mood == "panic"                 # an explicitly enabled
+    assert not pet._chase_blocked(), \
+        "quota mood must never overrule an explicitly enabled chase"
+    assert not pet._wander_blocked() or pet._activity is not None
+    pet._quota_mood = "sleep"                         # asleep: wander rests,
+    assert pet._wander_blocked()                      # but a chase may wake
+    assert not pet._chase_blocked(), "oneko wakes up to chase"
     pet.set_pct(60)
     pet.set_activity(("working", "Edit"))             # Claude works ...
     assert not pet._window_sit_blocked(), \
         "sitting on a window must survive Claude working"
+    assert pet._chase_blocked(), "chase yields while Claude works"
+    pet.set_activity(("waiting", None))               # ... Claude waits ...
+    assert not pet._chase_blocked(), \
+        "a WAITING Claude must not block the chase — that is when the user's cursor moves"
+    pet.set_pct(93)                                   # gait wins at ANY mood
+    pet._chase_state = "chase"
+    pet._update_mood()
+    if "carry" in pet._sprites.sprites:
+        assert pet.mood == "carry", "chase gait must show even while panicking"
+    pet._chase_state = "wait"
     pet.set_activity(None)
     pet.set_pct(10)
+    pet._update_mood()
     # progress line is always visible now (level 0 is a valid state)
     from . import progress as progress_mod
     st_bk = (progress_mod.STATE_FILE, progress_mod._state_loaded,

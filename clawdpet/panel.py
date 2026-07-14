@@ -198,7 +198,7 @@ class PanelWidget(QWidget):
         self.incident_label.setVisible(False)
         lay.addWidget(self.incident_label)
         self.progress_label = QLabel("")  # G: gamification level/XP line
-        self.progress_label.setObjectName("sub")
+        self.progress_label.setObjectName("rowlabel")   # prominent, not footnote
         self.progress_label.setWordWrap(True)
         lay.addWidget(self.progress_label)
         self.forecast_label = QLabel("")
@@ -551,7 +551,7 @@ class PanelWidget(QWidget):
         # always visible — a gamification line nobody can find is pointless;
         # level 0 with 0 XP is a valid starting state, not an error
         cur = progress.current()
-        self.progress_label.setText(tr(
+        self.progress_label.setText("🦀 " + tr(
             "progress_line", n=cur["level"], title=cur["title"],
             xp=fmt_de(int(cur["xp"])), nxt=fmt_de(int(cur["next_level_xp"]))))
         self.progress_label.setVisible(True)

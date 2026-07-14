@@ -114,6 +114,17 @@ def _load_calibration() -> None:
         pass
 
 
+def _reload_calibration() -> None:
+    """Re-sync the module state from the file before writing.
+
+    Several processes can run this code (the pet, probes, an old instance):
+    without re-reading, a writer with stale in-memory values would clobber a
+    fresher file and resurrect wrong budgets — observed live twice."""
+    global _calibration_loaded
+    _calibration_loaded = False
+    _load_calibration()
+
+
 def _save_calibration() -> None:
     data = {"budget_5h": _AUTO_BUDGET_5H,
             "weekly_budget": _WEEKLY_BUDGET_ALL,
@@ -141,7 +152,7 @@ def set_auto_calibration(budget_5h=None, weekly_anchor=None,
                          session_reset=None) -> None:
     global _AUTO_BUDGET_5H, _WEEKLY_ANCHOR, _WEEKLY_BUDGET_ALL
     global _WEEKLY_BUDGET_MODELS, _SESSION_ANCHOR
-    _load_calibration()
+    _reload_calibration()      # never write on top of a stale in-memory state
     before = auto_calibration()
     if session_reset is not None:
         _SESSION_ANCHOR = session_reset

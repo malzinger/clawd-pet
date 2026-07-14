@@ -591,7 +591,15 @@ class ClawdApp:
             # counter means a new window, so just re-arm the baseline.
             prev_ww = self._prev_week_weighted
             self._prev_week_weighted = snap.week_weighted
-            if prev_ww is not None and snap.week_weighted >= prev_ww:
+            if prev_ww is None and snap.week_weighted > 0 \
+                    and progress.current()["xp"] <= 0:
+                # first run ever: everything Clawd already ate this week
+                # counts as starting food — a level-0 pet after a week of
+                # heavy use felt broken ("Gamification kann ich nicht finden")
+                event = progress.add_usage(snap.week_weighted)
+                if event is not None:
+                    self._on_level_up(event)
+            elif prev_ww is not None and snap.week_weighted >= prev_ww:
                 event = progress.add_usage(snap.week_weighted - prev_ww)
                 if event is not None:
                     self._on_level_up(event)

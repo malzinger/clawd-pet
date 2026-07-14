@@ -334,7 +334,7 @@ class PetWidget(QWidget):
                 mood = "happy"
             elif kind == "error":
                 mood = "panic"
-        if mood == "chill":
+        if mood in ("chill", "focus"):
             if self._chase_state == "caught":
                 mood = "sleep"                     # napping on the caught cursor
             elif (((self._wander_enabled and self._wander_state == "walk")
@@ -343,7 +343,7 @@ class PetWidget(QWidget):
                 # walking gait while wandering (F5) or chasing the cursor (Y):
                 # the carrying gif is the only one with a walk cycle
                 mood = "carry"
-            elif self._idle_variant:
+            elif mood == "chill" and self._idle_variant:
                 mood = self._idle_variant          # play the random idle flourish
         else:
             self._idle_variant = None              # left idle -> don't resume a stale one
@@ -626,6 +626,12 @@ class PetWidget(QWidget):
                 self.update()
         self._update_mood()                  # enter/leave the walking gait
 
+    def _calm_enough(self) -> bool:
+        """Motion features (wander, chase, sitting) used to require the pure
+        "chill" quota mood — which above 50 % usage simply never holds, so
+        they looked broken all day. Only real alarm states block now."""
+        return self._quota_mood in ("chill", "focus")
+
     def _wander_blocked(self) -> bool:
         """No autonomous movement while the user or Claude interacts."""
         return (self._press_global is not None          # mid-drag
@@ -636,7 +642,7 @@ class PetWidget(QWidget):
                 or self._throw_active                   # flying (F12)
                 or self._chase_state != "wait"          # chasing/napping (Y)
                 or self._activity is not None           # visibly working
-                or self._quota_mood != "chill")         # alarmed or asleep
+                or not self._calm_enough())             # alarmed or asleep
 
     def _wander_tick(self):
         now = time.monotonic()
@@ -699,8 +705,9 @@ class PetWidget(QWidget):
         self._chase_enabled = bool(on)
         if self._chase_enabled:
             self._chase_state = "wait"
-            self._chase_next = (time.monotonic()
-                                + random.uniform(*CHASE_WAIT_RANGE_S))
+            # first attempt comes quickly (the user just toggled it and is
+            # watching); every later wait uses the lazy 30-90 s range
+            self._chase_next = time.monotonic() + random.uniform(8.0, 20.0)
             self._chase_timer.start()
         else:
             self._chase_timer.stop()
@@ -727,7 +734,7 @@ class PetWidget(QWidget):
                 or self._throw_active
                 or self._activity is not None
                 or self._generating
-                or self._quota_mood != "chill"
+                or not self._calm_enough()
                 or (self._wander_enabled and self._wander_state == "walk"))
 
     def _chase_tick(self):
@@ -814,10 +821,9 @@ class PetWidget(QWidget):
                 or (self.owner is not None
                     and self.owner.panel.isVisible())   # panel open
                 or self._react_active                   # petting reaction
-                or self._throw_active                   # flying (F12)
-                or self._activity is not None           # visibly working
-                or self._generating                     # typing along
-                or self._quota_mood != "chill")         # alarmed or asleep
+                or self._throw_active)                  # flying (F12)
+        # NOTE: activity/generating/quota mood do NOT suspend sitting — the
+        # whole point is Clawd perching on your window WHILE Claude works
 
     def _window_sit_tick(self):
         if not self._window_sit_enabled:

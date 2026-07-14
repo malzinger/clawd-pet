@@ -763,13 +763,23 @@ def run_selftest() -> int:
     xpanel.show()
     app.processEvents()
     assert not xpanel.grab().isNull(), "cost/projects panel render failed"
+    from PyQt5.QtGui import QFontInfo as _QFI
+    _req = {"win32": "Segoe UI", "darwin": "Helvetica Neue"}.get(sys.platform)
+    _strict = _req is None or _QFI(xpanel.cost_label.font()).family() == _req
     for w in (xpanel.cost_label, xpanel.projects_label):
         assert w.text() and not w.isHidden()
         need = w.fontMetrics().boundingRect(
             QRect(0, 0, w.width(), 10_000),
             Qt.TextWordWrap if w.wordWrap() else 0, w.text())
-        assert need.width() <= w.width() + 1 and need.height() <= w.height() + 1, \
-            f"cost/projects label clipped: {w.text()[:40]!r}"
+        fits = (need.width() <= w.width() + 1
+                and need.height() <= w.height() + 1)
+        if not fits and not _strict:
+            # headless Windows has no Segoe UI; the wider fallback font may
+            # clip — same tolerance as the title clip check above
+            print("[selftest] WARN: cost/projects clip under fallback "
+                  "font tolerated: " + ascii(w.text()[:40]))
+            continue
+        assert fits, f"cost/projects label clipped: {w.text()[:40]!r}"
     xpanel.hide()
     assert SONNET_INPUT_USD_PER_MTOK == 3.0
     print("[selftest] cost estimate + project split OK")
@@ -916,6 +926,9 @@ def run_selftest() -> int:
         capp.settings.setValue("pet_size", _w3_size)
 
     # F9: committed WAV assets exist; play() is bool and never raises
+    # (muted: QT_QPA_PLATFORM=offscreen hides windows but NOT audio — an
+    # unmuted selftest audibly beeps on the machine running it)
+    os.environ["CLAWD_NO_SOUND"] = "1"
     _w3_sounds = Path(__file__).resolve().parent.parent / "sounds"
     assert (_w3_sounds / "done.wav").is_file(), "done.wav asset missing"
     assert (_w3_sounds / "attention.wav").is_file(), "attention.wav missing"
@@ -2039,6 +2052,40 @@ def run_selftest() -> int:
     for _lang in ("de", "en"):
         assert "menu_window_sit" in _wstrings[_lang], _lang
     print("[selftest] window sitting OK")
+
+    # --- motion gates: focus must not paralyze wander/chase/sit -----------
+    pet.set_activity(None)
+    pet.set_generating(False)
+    pet.set_pct(60)                                   # "focus" quota mood
+    assert pet._quota_mood == "focus", pet._quota_mood
+    assert pet._calm_enough(), "focus is calm enough for motion features"
+    assert not pet._chase_blocked(), "chase must work at 60 % usage"
+    pet.set_pct(90)                                   # "panic" still blocks
+    assert not pet._calm_enough()
+    assert pet._chase_blocked()
+    pet.set_pct(60)
+    pet.set_activity(("working", "Edit"))             # Claude works ...
+    assert not pet._window_sit_blocked(), \
+        "sitting on a window must survive Claude working"
+    pet.set_activity(None)
+    pet.set_pct(10)
+    # progress line is always visible now (level 0 is a valid state)
+    from . import progress as progress_mod
+    st_bk = (progress_mod.STATE_FILE, progress_mod._state_loaded,
+             progress_mod._xp, progress_mod._state_mtime)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            progress_mod.STATE_FILE = Path(td) / "state.json"
+            progress_mod._state_loaded = True
+            progress_mod._state_mtime = None
+            progress_mod._xp = 0.0
+            panel._update_extras(UsageSnapshot(updated_at=datetime.now()))
+            assert panel.progress_label.isVisibleTo(panel)
+            assert "Level 0" in panel.progress_label.text()
+    finally:
+        (progress_mod.STATE_FILE, progress_mod._state_loaded,
+         progress_mod._xp, progress_mod._state_mtime) = st_bk
+    print("[selftest] motion gates + visible progress OK")
 
     print("[selftest] OK")
     del app

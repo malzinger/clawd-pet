@@ -548,14 +548,13 @@ class PanelWidget(QWidget):
         self.codex_label.setVisible(bool(rows))
 
         # G: gamification progress line — hidden until the pet earned any XP
+        # always visible — a gamification line nobody can find is pointless;
+        # level 0 with 0 XP is a valid starting state, not an error
         cur = progress.current()
-        if cur["xp"] > 0:
-            self.progress_label.setText(tr(
-                "progress_line", n=cur["level"], title=cur["title"],
-                xp=fmt_de(int(cur["xp"])), nxt=fmt_de(int(cur["next_level_xp"]))))
-        else:
-            self.progress_label.setText("")
-        self.progress_label.setVisible(bool(self.progress_label.text()))
+        self.progress_label.setText(tr(
+            "progress_line", n=cur["level"], title=cur["title"],
+            xp=fmt_de(int(cur["xp"])), nxt=fmt_de(int(cur["next_level_xp"]))))
+        self.progress_label.setVisible(True)
 
     def _update_forecast(self, snap: UsageSnapshot):
         """Burn-rate line: projected time of hitting the 5-hour limit."""

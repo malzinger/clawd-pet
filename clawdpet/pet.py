@@ -208,8 +208,14 @@ class PetWidget(QWidget):
         idle = ((snap.source == "logs" and snap.entries == 0)
                 or (snap.source == "api" and snap.pct <= 0))
         self.pct = snap.pct
+        mood_pct = snap.pct
+        if snap.source == "logs" and mood_pct >= 100.0:
+            # an estimate may look alarmed, but only LIVE data may assert the
+            # hard "over the limit" state — a drifted local window once showed
+            # 228 % while the real usage was at 51 %
+            mood_pct = 99.0
         self._quota_mood = ("sleep" if (not snap.error and idle)
-                            else mood_for_pct(snap.pct))
+                            else mood_for_pct(mood_pct))
         self._update_mood()
         if snap.error:
             self.setToolTip(snap.error)

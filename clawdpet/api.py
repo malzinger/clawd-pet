@@ -13,7 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +31,7 @@ from .config import (
     REFRESH_COOLDOWN_S,
     USAGE_URL,
     USE_API_USAGE,
+    WINDOW_HOURS,
 )
 from .i18n import tr
 from .usage import UsageSnapshot, _parse_iso_ts, scan_usage, set_auto_calibration
@@ -361,24 +362,7 @@ def collect_usage(should_stop=None) -> UsageSnapshot:
             # cached (stale) percentage with the still-growing local token count
             # would slowly skew the learned budget.
             if fetched_ok:
-                budget_5h = weekly_budget = anchor = None
-                model_budgets = {}
-                for b in buckets:
-                    if b.key == "seven_day" and b.resets_at is not None:
-                        anchor = b.resets_at
-                    if b.pct < 3.0:
-                        continue          # too close to zero to divide reliably
-                    if b.key == "five_hour" and snap.weighted > 0:
-                        budget_5h = round(snap.weighted / (b.pct / 100.0))
-                    elif b.key == "seven_day" and snap.week_weighted > 0:
-                        weekly_budget = round(snap.week_weighted / (b.pct / 100.0))
-                    elif b.key.startswith("weekly_"):
-                        name = b.label.split("·")[-1].strip()
-                        wtok = snap.week_by_model_weighted.get(name, 0.0)
-                        if wtok > 0:
-                            model_budgets[name] = round(wtok / (b.pct / 100.0))
-                set_auto_calibration(budget_5h, anchor, weekly_budget,
-                                     model_budgets or None)
+                _calibrate_from_buckets(snap, buckets)
             snap.live_state, snap.live_until = "live", None
             return snap
     snap = scan_usage(should_stop=should_stop)
@@ -402,6 +386,49 @@ def live_status():
     if kind in ("http", "net"):
         return "error", None
     return "off", None
+
+
+def _windows_aligned(local_end, live_end, tolerance_s: float) -> bool:
+    if local_end is None or live_end is None:
+        return False
+    return abs((local_end - live_end).total_seconds()) <= tolerance_s
+
+
+def _calibrate_from_buckets(snap, buckets) -> None:
+    """Learn budgets + window boundaries from one fresh live reading.
+
+    The reset boundaries (5h and weekly) are always stored — they re-anchor
+    the local window replay. The budget RATIOS are only trusted when the
+    locally counted window ends where the live one does: pairing a rolling/
+    drifted local window with a fixed live percentage once seeded budgets
+    that were off by 2x (observed live: panel 24 % vs claude.ai 39 %). On
+    the first fetch after a drift only the anchors are stored; the very
+    next scan counts aligned windows and then the ratios calibrate too.
+    """
+    budget_5h = weekly_budget = anchor = session_reset = None
+    model_budgets = {}
+    window = timedelta(hours=WINDOW_HOURS)
+    local_5h_end = snap.oldest + window if snap.oldest is not None else None
+    for b in buckets:
+        if b.key == "five_hour" and b.resets_at is not None:
+            session_reset = b.resets_at
+        if b.key == "seven_day" and b.resets_at is not None:
+            anchor = b.resets_at
+        if b.pct < 3.0:
+            continue              # too close to zero to divide reliably
+        if b.key == "five_hour" and snap.weighted > 0:
+            if _windows_aligned(local_5h_end, b.resets_at, 600):
+                budget_5h = round(snap.weighted / (b.pct / 100.0))
+        elif b.key == "seven_day" and snap.week_weighted > 0:
+            if _windows_aligned(snap.week_reset, b.resets_at, 3600):
+                weekly_budget = round(snap.week_weighted / (b.pct / 100.0))
+        elif b.key.startswith("weekly_"):
+            name = b.label.split("·")[-1].strip()
+            wtok = snap.week_by_model_weighted.get(name, 0.0)
+            if wtok > 0 and _windows_aligned(snap.week_reset, b.resets_at, 3600):
+                model_budgets[name] = round(wtok / (b.pct / 100.0))
+    set_auto_calibration(budget_5h, anchor, weekly_budget,
+                         model_budgets or None, session_reset=session_reset)
 
 
 def _fmt_reset(resets_at: Optional[datetime]) -> str:

@@ -1648,6 +1648,69 @@ def run_selftest() -> int:
     menu2.deleteLater()
     print("[selftest] integration wiring OK")
 
+    # --- usage accuracy round 2: session anchor + pairing guard -----------
+    from clawdpet.api import _calibrate_from_buckets, _windows_aligned, UsageBucket as UB
+    utc = timezone.utc
+    win_backup = (_usage._SESSION_ANCHOR, _usage._calibration_loaded,
+                  _usage.CALIBRATION_FILE)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            _usage.CALIBRATION_FILE = Path(td) / "cal.json"
+            _usage._calibration_loaded = True
+            now2 = datetime(2026, 7, 14, 15, 0, tzinfo=utc)
+            ts_all = [datetime(2026, 7, 14, h, 0, tzinfo=utc) for h in (8, 11, 14)]
+            # live says the window ends 17:00 -> it started 12:00, replay beaten
+            _usage._SESSION_ANCHOR = datetime(2026, 7, 14, 17, 0, tzinfo=utc)
+            ws = _current_window_start(ts_all, now2)
+            assert ws == datetime(2026, 7, 14, 12, 0, tzinfo=utc), ws
+            # boundary already passed -> the first message after it opens a window
+            _usage._SESSION_ANCHOR = datetime(2026, 7, 14, 13, 0, tzinfo=utc)
+            ws = _current_window_start(ts_all, now2)
+            assert ws == datetime(2026, 7, 14, 14, 0, tzinfo=utc), ws
+            _usage._SESSION_ANCHOR = None
+            # pairing guard: misaligned local window must NOT calibrate the
+            # budget but must still store both reset anchors
+            _usage.reset_auto_calibration()
+            snap_g = UsageSnapshot(updated_at=datetime.now())
+            snap_g.weighted = 500_000.0
+            snap_g.week_weighted = 10_000_000.0
+            snap_g.oldest = datetime(2026, 7, 14, 9, 45, tzinfo=utc)   # ends 14:45
+            snap_g.week_reset = None                                   # rolling
+            live_b = [UB("five_hour", "5h", 51.0,
+                         datetime(2026, 7, 14, 17, 0, tzinfo=utc)),    # ends 17:00
+                      UB("seven_day", "week", 39.0,
+                         datetime(2026, 7, 19, 21, 0, tzinfo=utc))]
+            _calibrate_from_buckets(snap_g, live_b)
+            cal_g = _usage.auto_calibration()
+            assert cal_g["budget_5h"] is None, "misaligned pairing must be skipped"
+            assert cal_g["weekly_budget"] is None
+            assert cal_g["session_reset"] == live_b[0].resets_at
+            assert cal_g["anchor"] == live_b[1].resets_at
+            # aligned windows -> both budgets calibrate
+            snap_g.oldest = datetime(2026, 7, 14, 12, 0, tzinfo=utc)   # ends 17:00
+            snap_g.week_reset = datetime(2026, 7, 19, 21, 0, tzinfo=utc)
+            _calibrate_from_buckets(snap_g, live_b)
+            cal_g = _usage.auto_calibration()
+            assert cal_g["budget_5h"] == round(500_000 / 0.51)
+            assert cal_g["weekly_budget"] == round(10_000_000 / 0.39)
+            assert _windows_aligned(None, live_b[0].resets_at, 600) is False
+            _usage.reset_auto_calibration()
+    finally:
+        (_usage._SESSION_ANCHOR, _usage._calibration_loaded,
+         _usage.CALIBRATION_FILE) = win_backup
+    # an estimate over 100 % may panic but never assert the hard limit
+    snap_lim = UsageSnapshot(updated_at=datetime.now())
+    snap_lim.source = "logs"
+    snap_lim.pct = 228.4
+    snap_lim.entries = 5
+    pet.set_snapshot(snap_lim)
+    assert pet._quota_mood == "panic", pet._quota_mood
+    snap_lim.source = "api"
+    pet.set_snapshot(snap_lim)
+    assert pet._quota_mood == "limit", "live data must still assert the limit"
+    pet.set_pct(10)                                   # restore chill for later blocks
+    print("[selftest] session anchor + pairing guard OK")
+
     print("[selftest] OK")
     del app
     return 0

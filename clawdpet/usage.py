@@ -71,6 +71,7 @@ _AUTO_BUDGET_5H: Optional[int] = None
 _WEEKLY_ANCHOR: Optional[datetime] = None       # one known weekly reset boundary
 _WEEKLY_BUDGET_ALL: Optional[int] = None
 _WEEKLY_BUDGET_MODELS: dict = {}
+_SESSION_ANCHOR: Optional[datetime] = None      # one known 5h reset boundary (live)
 
 
 # The learned budgets used to live only in module globals, so every pet
@@ -83,7 +84,7 @@ _calibration_loaded = False
 
 def _load_calibration() -> None:
     global _calibration_loaded, _AUTO_BUDGET_5H, _WEEKLY_ANCHOR
-    global _WEEKLY_BUDGET_ALL, _WEEKLY_BUDGET_MODELS
+    global _WEEKLY_BUDGET_ALL, _WEEKLY_BUDGET_MODELS, _SESSION_ANCHOR
     if _calibration_loaded:
         return
     _calibration_loaded = True
@@ -106,13 +107,20 @@ def _load_calibration() -> None:
         _WEEKLY_ANCHOR = anchor if anchor.tzinfo else None
     except (TypeError, ValueError):
         pass
+    try:
+        sess = datetime.fromisoformat(data.get("session_reset") or "")
+        _SESSION_ANCHOR = sess if sess.tzinfo else None
+    except (TypeError, ValueError):
+        pass
 
 
 def _save_calibration() -> None:
     data = {"budget_5h": _AUTO_BUDGET_5H,
             "weekly_budget": _WEEKLY_BUDGET_ALL,
             "models": _WEEKLY_BUDGET_MODELS,
-            "anchor": _WEEKLY_ANCHOR.isoformat() if _WEEKLY_ANCHOR else None}
+            "anchor": _WEEKLY_ANCHOR.isoformat() if _WEEKLY_ANCHOR else None,
+            "session_reset": (_SESSION_ANCHOR.isoformat()
+                              if _SESSION_ANCHOR else None)}
     try:
         CALIBRATION_FILE.parent.mkdir(parents=True, exist_ok=True)
         tmp = CALIBRATION_FILE.with_suffix(".json.tmp")
@@ -129,10 +137,14 @@ def effective_max_tokens() -> int:
 
 
 def set_auto_calibration(budget_5h=None, weekly_anchor=None,
-                         weekly_budget=None, weekly_model_budgets=None) -> None:
-    global _AUTO_BUDGET_5H, _WEEKLY_ANCHOR, _WEEKLY_BUDGET_ALL, _WEEKLY_BUDGET_MODELS
+                         weekly_budget=None, weekly_model_budgets=None,
+                         session_reset=None) -> None:
+    global _AUTO_BUDGET_5H, _WEEKLY_ANCHOR, _WEEKLY_BUDGET_ALL
+    global _WEEKLY_BUDGET_MODELS, _SESSION_ANCHOR
     _load_calibration()
     before = auto_calibration()
+    if session_reset is not None:
+        _SESSION_ANCHOR = session_reset
     if budget_5h:
         _AUTO_BUDGET_5H = int(budget_5h)
     if weekly_anchor is not None:
@@ -147,11 +159,13 @@ def set_auto_calibration(budget_5h=None, weekly_anchor=None,
 
 
 def reset_auto_calibration() -> None:
-    global _AUTO_BUDGET_5H, _WEEKLY_ANCHOR, _WEEKLY_BUDGET_ALL, _WEEKLY_BUDGET_MODELS
+    global _AUTO_BUDGET_5H, _WEEKLY_ANCHOR, _WEEKLY_BUDGET_ALL
+    global _WEEKLY_BUDGET_MODELS, _SESSION_ANCHOR
     _AUTO_BUDGET_5H = None
     _WEEKLY_ANCHOR = None
     _WEEKLY_BUDGET_ALL = None
     _WEEKLY_BUDGET_MODELS = {}
+    _SESSION_ANCHOR = None
     try:
         CALIBRATION_FILE.unlink()
     except OSError:
@@ -162,7 +176,8 @@ def auto_calibration() -> dict:
     _load_calibration()
     return {"budget_5h": _AUTO_BUDGET_5H, "anchor": _WEEKLY_ANCHOR,
             "weekly_budget": _WEEKLY_BUDGET_ALL,
-            "models": dict(_WEEKLY_BUDGET_MODELS)}
+            "models": dict(_WEEKLY_BUDGET_MODELS),
+            "session_reset": _SESSION_ANCHOR}
 
 
 def auto_budget_active() -> bool:
@@ -326,6 +341,25 @@ def _current_window_start(timestamps, now: datetime) -> Optional[datetime]:
     if not timestamps:
         return None
     window = timedelta(hours=WINDOW_HOURS)
+    _load_calibration()
+    reset = _SESSION_ANCHOR
+    if reset is not None and now < reset <= now + window:
+        # the live API told us exactly when the current window ends —
+        # that boundary beats any replay heuristic
+        return reset - window
+    if reset is not None and now >= reset and reset >= timestamps[0]:
+        # the known boundary has passed: chain forward from it — the first
+        # message at/after a reset opens the next window
+        idx = bisect.bisect_left(timestamps, reset)
+        if idx >= len(timestamps):
+            return None
+        start = timestamps[idx]
+        while now >= start + window:
+            idx = bisect.bisect_left(timestamps, start + window)
+            if idx >= len(timestamps):
+                return None
+            start = timestamps[idx]
+        return start
     anchor = timestamps[0]
     prev = timestamps[0]
     for ts in timestamps[1:]:

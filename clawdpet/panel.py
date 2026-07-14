@@ -190,6 +190,12 @@ class PanelWidget(QWidget):
         self.codex_label.setObjectName("sub")
         self.codex_label.setWordWrap(True)
         lay.addWidget(self.codex_label)
+        self.incident_label = QLabel("")  # Anthropic status-page incident
+        self.incident_label.setObjectName("sub")
+        self.incident_label.setStyleSheet("color: #e8a54e;")
+        self.incident_label.setWordWrap(True)
+        self.incident_label.setVisible(False)
+        lay.addWidget(self.incident_label)
         self.forecast_label = QLabel("")
         self.forecast_label.setObjectName("sub")
         self.forecast_label.setWordWrap(True)
@@ -488,6 +494,12 @@ class PanelWidget(QWidget):
                 tr("updated", t=snap.updated_at.strftime("%H:%M:%S"), src=src))
         self._update_context_row()      # X2: survives _show_only, hides when stale
         self._refresh_countdown()
+        self._relayout()
+
+    def set_incident(self, sick: bool):
+        """Anthropic reports a major incident — the numbers may lag/err."""
+        self.incident_label.setText(tr("incident_line") if sick else "")
+        self.incident_label.setVisible(bool(sick))
         self._relayout()
 
     def _update_extras(self, snap: UsageSnapshot):

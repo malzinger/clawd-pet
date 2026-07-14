@@ -132,15 +132,31 @@ calibration), `api` (read-only live sync), `activity`/`hooks` (real time),
 - **Wander mode (opt-in):** a tray toggle lets Clawd stroll across the
   screen while idle — he turns around at the edges and pauses when you
   hover, drag or Claude starts working.
-- **Codex CLI too:** if you also use OpenAI's Codex CLI, Clawd notices its
-  sessions (`~/.codex/sessions`) and animates along — Claude sessions always
-  take precedence.
+- **Codex CLI too — with real numbers:** if you also use OpenAI's Codex
+  CLI, Clawd notices its sessions and animates along, shows Codex's actual
+  rate limits in the panel (read locally via `codex app-server`, e.g.
+  "Codex · week 51 %"), and an optional notify hook fires a "your turn"
+  alert when a Codex turn completes. Claude sessions always take precedence.
+- **Context-window display (opt-in):** register Clawd as Claude Code's
+  statusline and the panel shows how full the current context window is —
+  Claude Code itself gets a compact fill line too. Never replaces a
+  statusline you already configured.
+- **Richer live reactions:** Clawd juggles while subagents run, gets
+  startled by tool failures, sweeps while Claude compacts the context,
+  "types along" while Claude generates, and does a little celebration hop
+  whenever a usage window resets. During an Anthropic incident the panel
+  says so (status page check, fail-open).
+- **Cursor chase (opt-in):** oneko-style — while idle Clawd occasionally
+  chases your mouse cursor, catches it, and naps on it until it escapes.
+- **Battery-friendly:** after a minute of true idleness the animation
+  drops to a slow tick and snaps back instantly on any activity.
 - **Cost estimate & project split:** the panel shows the approximate
   pay-as-you-go API value of your current window/week and which projects
   burn the most tokens (top 3).
 - **Make him yours:** tray menu offers three sizes (S/M/L), optional
   notification chimes (with system-beep fallback), click-through mode, and
-  custom sprite packs — point Clawd at any folder with compatible GIFs.
+  custom sprite packs — point Clawd at any folder with compatible GIFs or
+  import a community pack (petdex / "Codex pet" zip) via the tray menu.
 - **Bilingual UI:** the whole app (panel, bubbles, menus, dialogs, number
   formats) switches between English and German — tray menu → "Sprache/Language".
 - Drag him anywhere; the position is remembered. Tray icon with manual

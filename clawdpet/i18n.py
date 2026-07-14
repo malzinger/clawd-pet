@@ -213,6 +213,13 @@ STRINGS = {
         "codex_notify_foreign": "In ~/.codex/config.toml ist bereits ein "
                                 "eigener notify-Eintrag konfiguriert — bitte "
                                 "zuerst entfernen.",
+        # --- integration: chase menu, pack import, incident ---
+        "menu_chase": "Cursor jagen (oneko)",
+        "menu_pack_import": "Sprite-Pack importieren (petdex) …",
+        "pack_invalid_text": "Kein importierbares Sprite-Pack gefunden\n"
+                             "(mind. eine Idle-Animation nötig).",
+        "incident_line": "⚠ Anthropic meldet eine Störung — status.anthropic.com",
+        "bubble_incident": "Anthropic hat gerade eine Störung …",
         # --- X2: hook events + statusline ---
         "bubble_compact": "Ich räume den Kontext auf …",
         "menu_statusline_on": "Kontext-Anzeige aktivieren",
@@ -369,6 +376,13 @@ STRINGS = {
         "menu_codex_notify_off": "Disable Codex alerts",
         "codex_notify_foreign": "~/.codex/config.toml already has its own "
                                 "notify entry — please remove it first.",
+        # --- integration: chase menu, pack import, incident ---
+        "menu_chase": "Chase the cursor (oneko)",
+        "menu_pack_import": "Import sprite pack (petdex) …",
+        "pack_invalid_text": "No importable sprite pack found\n"
+                             "(needs at least an idle animation).",
+        "incident_line": "⚠ Anthropic reports an incident — status.anthropic.com",
+        "bubble_incident": "Anthropic is having an incident …",
         # --- X2: hook events + statusline ---
         "bubble_compact": "Compacting context …",
         "menu_statusline_on": "Enable context display",

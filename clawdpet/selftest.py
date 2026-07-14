@@ -1602,6 +1602,52 @@ def run_selftest() -> int:
     assert "Codex" in panel.codex_label.text()
     print("[selftest] codex notify e2e + panel line OK")
 
+    # --- integration: celebrate-on-reset, incident line, menu entries -----
+    from clawdpet import status_check as sc_mod
+    sc_backup = dict(sc_mod._cache)
+    assert sc_mod.anthropic_sick(now=1e9, fetch=lambda: "major") is True
+    assert sc_mod.anthropic_sick(now=1e9 + 5,
+                                 fetch=lambda: "none") is True   # throttled
+    assert sc_mod.anthropic_sick(now=1e9 + 700, fetch=lambda: "none") is False
+    assert sc_mod.anthropic_sick(now=1e9 + 1400, fetch=lambda: None) is False
+    sc_mod._cache.update(sc_backup)
+    panel.set_incident(True)
+    assert panel.incident_label.isVisibleTo(panel)
+    assert "status.anthropic.com" in panel.incident_label.text()
+    panel.set_incident(False)
+    assert not panel.incident_label.isVisibleTo(panel)
+    # a quota reset makes the pet celebrate (DND suppresses it)
+    capp.dnd = False
+    capp.pet._react_active = False
+    capp.pet._celebrating = False
+    capp._prev_pct["api"] = 90.0
+    capp._notify_transition("api", 3.0)
+    assert capp.pet._celebrating, "quota reset must trigger a celebration"
+    capp.pet._stop_throw()
+    capp.pet._end_reaction()
+    capp.dnd = True
+    capp._prev_pct["api"] = 90.0
+    capp._notify_transition("api", 3.0)
+    assert not capp.pet._celebrating, "DND must suppress the celebration"
+    capp.dnd = False
+    # typing-along follows hook-driven working state
+    capp._handle_hook_event({"hook_event_name": "PreToolUse",
+                             "tool_name": "Edit"})
+    assert capp.pet._generating, "working hook must start the typing bob"
+    capp._handle_hook_event({"hook_event_name": "Stop"})
+    assert not capp.pet._generating
+    # new tray entries exist (codex entry only with a codex binary present)
+    menu2 = capp.build_menu(None)
+    acts2 = [a.text() for a in menu2.actions() if a.text()]
+    assert tr("menu_chase") in acts2, "cursor-chase toggle missing"
+    assert tr("menu_pack_import") in acts2, "pack import entry missing"
+    import shutil as _sh
+    if _sh.which("codex"):
+        assert (tr("menu_codex_notify_on") in acts2
+                or tr("menu_codex_notify_off") in acts2)
+    menu2.deleteLater()
+    print("[selftest] integration wiring OK")
+
     print("[selftest] OK")
     del app
     return 0

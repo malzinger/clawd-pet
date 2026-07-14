@@ -5,6 +5,7 @@ API to hammer) and always fail-open: any error means "assume healthy",
 the pet must never look sick because the user's network blipped.
 """
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -19,6 +20,8 @@ _cache = {"indicator": "none", "ts": 0.0}
 
 def fetch_status_indicator() -> Optional[str]:
     """Raw Statuspage indicator: none|minor|major|critical, None on error."""
+    if os.environ.get("CLAWD_NO_API"):
+        return None                  # offline/CI — fail-open, never "sick"
     req = urllib.request.Request(STATUS_URL, headers={
         "User-Agent": "ClawdPet/1.0"})
     try:

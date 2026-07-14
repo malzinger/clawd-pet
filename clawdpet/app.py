@@ -38,7 +38,7 @@ from .api import (
     collect_usage,
     force_live_refetch,
 )
-from .art import make_app_icon
+from .art import import_sprite_pack, make_app_icon
 from .autostart import autostart_enabled, autostart_supported, set_autostart
 from .bubble import SpeechBubble
 from .codex import (
@@ -84,6 +84,7 @@ from .hooks import (
     unregister_permission_hook,
 )
 from .permission_bubble import PermissionBubble
+from .status_check import anthropic_sick
 from .statusline import (
     register_statusline,
     statusline_registered,
@@ -130,6 +131,10 @@ class ScanThread(QThread):
             snap.codex_buckets = codex_usage()
         except Exception:
             snap.codex_buckets = None
+        try:
+            snap.anthropic_sick = anthropic_sick()   # 10-min throttle inside
+        except Exception:
+            snap.anthropic_sick = False
         self.result.emit(snap)
 # ======================================================================
 #  Application controller — wires pet, panel, tray and scanner together
@@ -185,6 +190,8 @@ class ClawdApp:
         self.dnd = self.settings.value("dnd", False, type=bool)   # master mute
         self.wander = self.settings.value("wander", False, type=bool)
         self.click_through = self.settings.value("click_through", False, type=bool)
+        self.cursor_chase = self.settings.value("cursor_chase", False, type=bool)
+        self._was_sick = False           # Anthropic incident edge detection
         # burn-rate history and last pct are kept PER SOURCE ("api"/"logs"):
         # the two modes report on different absolute scales, so cross-comparing
         # them would fake resets — but a transient api->logs->api fallback (an
@@ -264,6 +271,7 @@ class ClawdApp:
         self._restore_position()
         self.pet.enable_wander(self.wander)          # F5 (opt-in)
         self.pet.set_click_through(self.click_through)   # F8 (opt-in)
+        self.pet.enable_cursor_chase(self.cursor_chase)  # Y (opt-in)
 
     # -------------------------------------------------- lifecycle
 
@@ -438,6 +446,12 @@ class ClawdApp:
         act_click.triggered.connect(self.toggle_click_through)
         menu.addAction(act_click)
 
+        act_chase = QAction(tr("menu_chase"), menu)     # Y: oneko mode
+        act_chase.setCheckable(True)
+        act_chase.setChecked(self.cursor_chase)
+        act_chase.triggered.connect(self.toggle_cursor_chase)
+        menu.addAction(act_chase)
+
         size_menu = menu.addMenu(tr("menu_size"))    # F2: S / M / L presets
         size_group = QActionGroup(size_menu)
         size_group.setExclusive(True)
@@ -453,6 +467,9 @@ class ClawdApp:
         act_sprites = QAction(tr("menu_sprites_choose"), menu)   # F13
         act_sprites.triggered.connect(self.choose_sprite_dir)
         menu.addAction(act_sprites)
+        act_pack = QAction(tr("menu_pack_import"), menu)   # Y: petdex import
+        act_pack.triggered.connect(self.import_pack_dialog)
+        menu.addAction(act_pack)
         if self.sprite_dir is not None:
             act_spr_reset = QAction(tr("menu_sprites_reset"), menu)
             act_spr_reset.triggered.connect(self.reset_sprite_dir)
@@ -513,6 +530,12 @@ class ClawdApp:
             snap.burn_eta = burn_eta(samples)
             self._notify_transition(snap.source, snap.pct)
             self.history.add(now, snap.pct)
+        sick = bool(getattr(snap, "anthropic_sick", False))
+        if sick != self._was_sick:
+            self._was_sick = sick
+            self.panel.set_incident(sick)
+            if sick and not self.dnd and not self.quiet and self.pet.isVisible():
+                self.bubble.show_text(tr("bubble_incident"), self.pet, 8000)
         cal = auto_calibration()          # persist budgets learned from live syncs
         if cal["budget_5h"]:
             self.settings.setValue("auto_budget_5h", cal["budget_5h"])
@@ -604,6 +627,7 @@ class ClawdApp:
         prev = self._last_activity
         self._last_activity = act
         self.pet.set_activity(act)
+        self.pet.set_generating(bool(act and act[0] == "working"))
         if act == prev or self.quiet or self.dnd or not self.pet.isVisible():
             return
         if act and act[0] == "working" and act[1]:
@@ -726,6 +750,7 @@ class ClawdApp:
         if act is not None or clear_act:
             self._last_activity = act
             self.pet.set_activity(act)
+            self.pet.set_generating(bool(act and act[0] == "working"))
         if text and not self.quiet and not self.dnd and self.pet.isVisible():
             # a "needs you" bubble jumps to the terminal when clicked
             self.bubble.show_text(
@@ -736,6 +761,7 @@ class ClawdApp:
         if self.pet._activity and self.pet._activity[0] == "error":
             self._last_activity = None
             self.pet.set_activity(None)
+            self.pet.set_generating(False)
 
     def toggle_quiet(self):
         self.quiet = not self.quiet
@@ -791,6 +817,11 @@ class ClawdApp:
         self.pet.enable_wander(self.wander)
         self._rebuild_tray_menu()
 
+    def toggle_cursor_chase(self):
+        self.cursor_chase = not self.cursor_chase
+        self.settings.setValue("cursor_chase", self.cursor_chase)
+        self.pet.enable_cursor_chase(self.cursor_chase)
+
     def toggle_click_through(self):
         self.click_through = not self.click_through
         self.settings.setValue("click_through", self.click_through)
@@ -828,6 +859,18 @@ class ClawdApp:
         if not self._set_sprite_dir(Path(chosen)):
             QMessageBox.warning(None, tr("sprites_invalid_title"),
                                 tr("sprites_invalid_text"))
+
+    def import_pack_dialog(self):
+        """Import a petdex/'Codex pet' community pack (.zip or folder)."""
+        chosen, _ = QFileDialog.getOpenFileName(
+            None, tr("menu_pack_import"), "",
+            "Sprite-Pack (*.zip);;Alle Dateien (*)")
+        if not chosen:
+            return
+        dest = import_sprite_pack(Path(chosen))
+        if dest is None or not self._set_sprite_dir(dest):
+            QMessageBox.warning(None, tr("sprites_invalid_title"),
+                                tr("pack_invalid_text"))
 
     def _set_sprite_dir(self, path: Path) -> bool:
         """Activate a sprite pack; False (setting untouched) when invalid."""
@@ -896,6 +939,8 @@ class ClawdApp:
         prev = self._prev_pct.get(source)
         self._prev_pct[source] = pct
         kind = notify_decision(prev, pct)
+        if kind == "reset" and not self.dnd:
+            self.pet.celebrate()          # quota refreshed — party hop (Y)
         if (kind is None or self.tray is None or not self.notify_enabled
                 or self.dnd):
             return

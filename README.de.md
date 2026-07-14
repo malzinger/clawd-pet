@@ -136,15 +136,31 @@ Paket `clawdpet/` — grob: `usage` (Log-Scan, 5-h-Fenster, Kalibrierung),
 - **Herumlaufen (opt-in):** Ein Tray-Schalter lässt Clawd im Leerlauf über
   den Bildschirm spazieren — an den Kanten dreht er um, bei Hover, Drag oder
   sobald Claude arbeitet, bleibt er stehen.
-- **Auch Codex CLI:** Wer zusätzlich OpenAIs Codex CLI nutzt, sieht Clawd
-  auch auf dessen Sessions reagieren (`~/.codex/sessions`) — Claude-Sessions
-  haben immer Vorrang.
+- **Auch Codex CLI — mit echten Zahlen:** Wer zusätzlich OpenAIs Codex CLI
+  nutzt, sieht Clawd auch auf dessen Sessions reagieren, bekommt Codex'
+  echte Rate-Limits ins Panel (lokal via `codex app-server` gelesen, z. B.
+  „Codex · Woche 51 %") und optional eine „Dein Turn"-Meldung, wenn ein
+  Codex-Turn fertig ist. Claude-Sessions haben immer Vorrang.
+- **Kontext-Fenster-Anzeige (opt-in):** Clawd registriert sich als
+  Claude-Code-Statusline und das Panel zeigt, wie voll das aktuelle
+  Kontextfenster ist — Claude Code selbst bekommt eine kompakte Füllstands-
+  Zeile dazu. Eine bereits konfigurierte Statusline wird nie ersetzt.
+- **Mehr Live-Reaktionen:** Clawd jongliert, solange Subagenten laufen,
+  erschrickt bei Tool-Fehlern, fegt beim Kontext-Compacting, „tippt mit",
+  während Claude generiert, und macht einen Jubel-Hüpfer, wenn ein
+  Nutzungsfenster zurückgesetzt wird. Bei einer Anthropic-Störung sagt das
+  Panel Bescheid (Status-Page-Check, fail-open).
+- **Cursorjagd (opt-in):** oneko-Style — im Leerlauf jagt Clawd gelegentlich
+  den Mauszeiger, fängt ihn und schläft darauf ein, bis er entkommt.
+- **Akku-schonend:** Nach einer Minute echtem Leerlauf taktet die Animation
+  herunter und springt bei jeder Aktivität sofort zurück.
 - **Kosten-Schätzung & Projekt-Split:** Das Panel zeigt den ungefähren
   API-Gegenwert des aktuellen Fensters/der Woche und welche Projekte die
   meisten Tokens verbrauchen (Top 3).
 - **Mach ihn zu deinem:** Tray-Menü mit drei Größen (S/M/L), optionalen
   Benachrichtigungs-Sounds (mit System-Beep-Fallback), Klick-Durchlässigkeit
-  und eigenen Sprite-Packs — einfach einen Ordner mit kompatiblen GIFs wählen.
+  und eigenen Sprite-Packs — einen Ordner mit kompatiblen GIFs wählen oder
+  ein Community-Pack (petdex / „Codex pet"-Zip) über das Tray-Menü importieren.
 - **Zweisprachig:** Die komplette Oberfläche (Panel, Sprechblasen, Menüs,
   Dialoge, Zahlenformate) schaltet zwischen Deutsch und Englisch um —
   Tray-Menü → „Language/Sprache".

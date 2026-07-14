@@ -926,6 +926,9 @@ def run_selftest() -> int:
         capp.settings.setValue("pet_size", _w3_size)
 
     # F9: committed WAV assets exist; play() is bool and never raises
+    # (muted: QT_QPA_PLATFORM=offscreen hides windows but NOT audio — an
+    # unmuted selftest audibly beeps on the machine running it)
+    os.environ["CLAWD_NO_SOUND"] = "1"
     _w3_sounds = Path(__file__).resolve().parent.parent / "sounds"
     assert (_w3_sounds / "done.wav").is_file(), "done.wav asset missing"
     assert (_w3_sounds / "attention.wav").is_file(), "attention.wav missing"

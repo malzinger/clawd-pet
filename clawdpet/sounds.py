@@ -1,4 +1,5 @@
 """Notification sounds (F9): tiny bundled WAVs played via QSoundEffect."""
+import os
 from pathlib import Path
 
 # The WAV assets live next to the package, one level above it — the same
@@ -37,8 +38,11 @@ def play(kind: str) -> bool:
                 return False
             effect = QSoundEffect()
             effect.setSource(QUrl.fromLocalFile(str(fp)))
-            effect.setVolume(0.5)
             _effects[kind] = effect
+        # CLAWD_NO_SOUND mutes real output while keeping the full playback
+        # path exercised — offscreen selftests still reach the audio engine,
+        # so returning early here would change what the test verifies.
+        effect.setVolume(0.0 if os.environ.get("CLAWD_NO_SOUND") else 0.5)
         effect.play()
         return True
     except Exception:

@@ -1468,6 +1468,12 @@ def run_selftest() -> int:
     pet.enable_cursor_chase(True)
     avail = pet._screen_avail()
     pet.move(avail.left() + 10, avail.center().y())  # room to walk right
+    # a cursor right next to the pet must NOT trigger a chase (oneko sits)
+    pet._chase_test_target = QPoint(pet.x() + pet.width() // 2 + 10,
+                                    avail.center().y())
+    pet._chase_next = 0.0
+    pet._chase_tick()
+    assert pet._chase_state == "wait", "nearby cursor must not start a chase"
     start_x = pet.x()
     pet._chase_test_target = QPoint(pet.x() + pet.width() // 2 + 400,
                                     avail.center().y())

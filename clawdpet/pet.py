@@ -20,7 +20,6 @@ from .config import (
     CHASE_SPEED_PX,
     CHASE_STOP_SHORT_PX,
     CHASE_TICK_MS,
-    CHASE_WAIT_RANGE_S,
     PET_HEIGHT,
     THROTTLE_IDLE_S,
     THROTTLE_TICK_MS,
@@ -700,9 +699,10 @@ class PetWidget(QWidget):
         self._chase_enabled = bool(on)
         if self._chase_enabled:
             self._chase_state = "wait"
-            # first attempt comes quickly (the user just toggled it and is
-            # watching); every later wait uses the lazy 30-90 s range
-            self._chase_next = time.monotonic() + random.uniform(8.0, 20.0)
+            # oneko chases CONTINUOUSLY — the earlier "occasional attempts"
+            # design (30-90 s waits) plus blocking phases meant user and pet
+            # basically never met. _chase_next now only debounces re-entry.
+            self._chase_next = time.monotonic() + 1.0
             self._chase_timer.start()
         else:
             self._chase_timer.stop()
@@ -716,7 +716,7 @@ class PetWidget(QWidget):
 
     def _chase_rearm(self, now: float):
         self._chase_state = "wait"
-        self._chase_next = now + random.uniform(*CHASE_WAIT_RANGE_S)
+        self._chase_next = now + random.uniform(3.0, 8.0)   # short breather
         self._update_mood()
 
     def _chase_blocked(self) -> bool:
@@ -750,7 +750,12 @@ class PetWidget(QWidget):
                 self._chase_rearm(now)
             return
         if self._chase_state == "wait":
-            if now >= self._chase_next:
+            # engage whenever the debounce passed AND the cursor is actually
+            # away — a cat next to the mouse just sits there
+            target = self._chase_target_pos()
+            cx = self.x() + self.width() // 2
+            if (now >= self._chase_next
+                    and abs(target.x() - cx) > CHASE_RELEASE_PX):
                 self._chase_state = "chase"
                 self._chase_carry = 0.0
                 self._mark_active()

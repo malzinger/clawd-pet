@@ -1019,7 +1019,8 @@ def run_selftest() -> int:
     # --- F11 permission bubble: registration, protocol, widget, hook e2e ---
     import socket as socket_mod
     import subprocess
-    from .hooks import (permission_hook_registered, register_permission_hook,
+    from .hooks import (PERMISSION_HOOK_TIMEOUT_S,
+                        permission_hook_registered, register_permission_hook,
                         unregister_permission_hook)
     from .permission_bubble import PermissionBubble
 
@@ -1032,7 +1033,8 @@ def run_selftest() -> int:
         assert hooks_registered(sp) and permission_hook_registered(sp)
         pdata = json.loads(sp.read_text(encoding="utf-8"))
         pentry = pdata["hooks"]["PermissionRequest"][0]["hooks"][0]
-        assert pentry["timeout"] == 20, "permission hook needs its timeout"
+        assert pentry["timeout"] == PERMISSION_HOOK_TIMEOUT_S, \
+            "permission hook needs its timeout"
         assert unregister_hooks(sp)                  # activity off ...
         assert permission_hook_registered(sp), "permission entry lost"
         assert not hooks_registered(sp)

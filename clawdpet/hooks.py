@@ -207,7 +207,9 @@ def refresh_hook_copy() -> None:
 # enabled/disabled independently through the same settings.json machinery.
 PERMISSION_MARKER = "clawd_permission_hook.py"
 PERMISSION_EVENT = "PermissionRequest"
-PERMISSION_HOOK_TIMEOUT_S = 20      # > the script's own 0.5 s + 15 s budget
+PERMISSION_HOOK_TIMEOUT_S = 120     # hard cap in settings.json; must exceed
+                                    # the longest window the pet announces
+                                    # (110 s with remote approval active)
 
 
 def permission_hook_registered(settings_path: Path) -> bool:

@@ -1,5 +1,6 @@
 """Application controller + entry point — wires pet, panel, tray, scanner."""
 import json
+import os
 import sys
 import tempfile
 import time
@@ -7,6 +8,13 @@ import webbrowser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+
+# Qt on macOS activates the WHOLE app inside QWidget.raise_() when it is
+# inactive ([NSApp activateIgnoringOtherApps:]) — so every reaction bubble
+# stole the keyboard focus from whatever the user was typing in. The escape
+# hatch is documented in Qt's cocoa plugin and must be set before the
+# QApplication exists, hence at import time. setdefault: a user override wins.
+os.environ.setdefault("QT_MAC_SET_RAISE_PROCESS", "0")
 
 from PyQt5.QtCore import (
     QLockFile,

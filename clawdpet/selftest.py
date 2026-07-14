@@ -1821,6 +1821,21 @@ def run_selftest() -> int:
     api_mod._api_cache.update(cache_bk2)
     print("[selftest] live-first projection + reload OK")
 
+    # --- focus-steal fix: raise_() must never activate the app ------------
+    assert os.environ.get("QT_MAC_SET_RAISE_PROCESS") == "0", \
+        "raise_() app-activation escape hatch must be set at import time"
+    raised = []
+    bub2 = SpeechBubble()
+    bub2.raise_ = lambda: raised.append(1)
+    bub2.show_text("focus test", pet, 50)
+    if sys.platform == "darwin":
+        assert not raised, "raise_() on macOS activates the app — must be skipped"
+    else:
+        assert raised, "non-mac keeps raise_ for stacking"
+    bub2.hide()
+    bub2.deleteLater()
+    print("[selftest] no-activate raise OK")
+
     print("[selftest] OK")
     del app
     return 0

@@ -482,6 +482,11 @@ class PanelWidget(QWidget):
         if snap.updated_at:
             if snap.source == "api":
                 src = tr("src_live")
+                fetched = snap.live_fetched_at
+                if (fetched is not None
+                        and (snap.updated_at - fetched).total_seconds() > 120):
+                    # between polls: live values + locally projected delta
+                    src = tr("src_live_proj", t=fetched.strftime("%H:%M"))
             elif is_calibrated() or auto_budget_active():
                 src = tr("src_local")
             else:

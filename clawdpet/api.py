@@ -23,7 +23,6 @@ from .config import (
     API_MAX_BACKOFF_S,
     API_OK_INTERVAL_S,
     API_RETRY_S,
-    API_STALE_S,
     CLAWD_AUTH_FILE,
     RATE_LIMIT_BASE_S,
     RATE_LIMIT_MAX_S,
@@ -36,7 +35,8 @@ from .config import (
     WINDOW_HOURS,
 )
 from .i18n import tr
-from .usage import UsageSnapshot, _parse_iso_ts, scan_usage, set_auto_calibration
+from .usage import (UsageSnapshot, _parse_iso_ts, auto_calibration,
+                    scan_usage, set_auto_calibration)
 
 # ======================================================================
 #  Live usage via the Anthropic OAuth API — the same numbers the Claude
@@ -381,16 +381,53 @@ def _parse_usage_buckets(data: dict) -> Optional[list]:
     return buckets or None
 
 
-_api_cache = {"buckets": None, "ts": 0.0, "next": 0.0, "fails": 0}   # throttle + back off
+# throttle + back-off + the projection base: the local counters at the moment
+# of the last successful fetch. Between polls the display shows the LIVE
+# percentages plus only the locally counted growth since that fetch — the local
+# scale never sets the absolute level (gold standard: server values are the
+# single source of truth, local logs only bridge the gap between two syncs).
+_api_cache = {"buckets": None, "ts": 0.0, "next": 0.0, "fails": 0,
+              "base": None, "boundary": None}
+
+
+def _project_buckets(buckets, base, snap) -> list:
+    """Live pct + locally counted delta since the fetch, per bucket.
+
+    Deltas are scaled by the live-learned budgets and clamped to [live, 100];
+    if a local counter shrank (window reset, log rewrite) the raw live value
+    is kept — a projection must never show LESS than the last live truth."""
+    cal = auto_calibration()
+    out = []
+    for b in buckets:
+        pct = b.pct
+        if (b.key == "five_hour" and cal["budget_5h"]
+                and snap.weighted >= base["weighted"]):
+            pct += (snap.weighted - base["weighted"]) / cal["budget_5h"] * 100.0
+        elif (b.key == "seven_day" and cal["weekly_budget"]
+                and snap.week_weighted >= base["week_weighted"]):
+            pct += ((snap.week_weighted - base["week_weighted"])
+                    / cal["weekly_budget"] * 100.0)
+        elif b.key.startswith("weekly_"):
+            name = b.label.split("·")[-1].strip()
+            bud = cal["models"].get(name)
+            prev = base["week_model"].get(name, 0.0)
+            cur = snap.week_by_model_weighted.get(name, 0.0)
+            if bud and cur >= prev:
+                pct += (cur - prev) / bud * 100.0
+        out.append(UsageBucket(key=b.key, label=b.label,
+                               pct=min(100.0, max(b.pct, pct)),
+                               resets_at=b.resets_at))
+    return out
 
 
 def collect_usage(should_stop=None) -> UsageSnapshot:
     """API first (exact numbers), local log estimate as fallback. The usage
     endpoint is polled at most every API_OK_INTERVAL_S; between polls the last
     buckets are reused so the log scan can run every couple of seconds without
-    hammering Anthropic. Repeated failures back off exponentially, and a single
-    blip keeps the last live reading (up to API_STALE_S) instead of flipping the
-    whole panel to the estimate."""
+    hammering Anthropic. Between polls the shown percentages are the last live
+    values plus the locally counted delta (see _project_buckets); repeated
+    failures back off exponentially and only a persistently dead sync (>= 3
+    fails over two intervals) drops the panel to the pure local estimate."""
     fetched_ok = False
     if USE_API_USAGE:
         now_s = time.time()
@@ -405,8 +442,14 @@ def collect_usage(should_stop=None) -> UsageSnapshot:
             else:
                 _api_cache["fails"] += 1
                 _api_cache["next"] = now_s + _failure_backoff(_api_cache["fails"])
-                if _api_cache["buckets"] is not None and now_s - _api_cache["ts"] > API_STALE_S:
-                    _api_cache["buckets"] = None       # last live reading too old — show the estimate
+                # a single blip must NOT flip the panel to the local absolute
+                # scale — the last live reading (plus projection) stays up
+                # until the sync has failed repeatedly for two whole intervals
+                if (_api_cache["buckets"] is not None
+                        and _api_cache["fails"] >= 3
+                        and now_s - _api_cache["ts"] > 2 * API_OK_INTERVAL_S):
+                    _api_cache["buckets"] = None
+                    _api_cache["base"] = None
         buckets = _api_cache["buckets"]
         if buckets:
             # keep the local per-model token counts as extra detail
@@ -415,15 +458,33 @@ def collect_usage(should_stop=None) -> UsageSnapshot:
                 snap = UsageSnapshot(updated_at=datetime.now())
             snap.error = ""
             snap.source = "api"
-            snap.buckets = buckets
-            five = next((b for b in buckets if b.key == "five_hour"), buckets[0])
+            if not fetched_ok and _api_cache["base"] is not None:
+                shown = _project_buckets(buckets, _api_cache["base"], snap)
+            else:
+                shown = buckets
+            snap.buckets = shown
+            snap.live_fetched_at = datetime.fromtimestamp(_api_cache["ts"])
+            five = next((b for b in shown if b.key == "five_hour"), shown[0])
             snap.pct = five.pct
+            # the live window just rolled over -> get fresh numbers right away
+            # (once per boundary; a failing repoll keeps its normal back-off)
+            live_five = next((b for b in buckets if b.key == "five_hour"), None)
+            if (live_five is not None and live_five.resets_at is not None
+                    and datetime.now(timezone.utc) >= live_five.resets_at
+                    and _api_cache["boundary"] != live_five.resets_at):
+                _api_cache["boundary"] = live_five.resets_at
+                _api_cache["next"] = 0.0
 
             # auto-calibrate only from a *freshly fetched* reading: pairing a
             # cached (stale) percentage with the still-growing local token count
             # would slowly skew the learned budget.
             if fetched_ok:
                 _calibrate_from_buckets(snap, buckets)
+                _api_cache["base"] = {
+                    "weighted": snap.weighted,
+                    "week_weighted": snap.week_weighted,
+                    "week_model": dict(snap.week_by_model_weighted),
+                }
             snap.live_state, snap.live_until = "live", None
             return snap
     snap = scan_usage(should_stop=should_stop)

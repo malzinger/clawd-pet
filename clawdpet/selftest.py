@@ -1766,6 +1766,61 @@ def run_selftest() -> int:
         api_mod._fetch_fail.update(kind=None, retry_after=None)
     print("[selftest] token rotation OK")
 
+    # --- live-first display: projection, stale grace, mtime reload --------
+    from clawdpet.api import _project_buckets
+    cal_bk2 = (_usage.CALIBRATION_FILE, _usage._calibration_loaded,
+               _usage._calibration_mtime)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            _usage.CALIBRATION_FILE = Path(td) / "cal.json"
+            _usage._calibration_loaded = True
+            _usage._calibration_mtime = None
+            _usage.reset_auto_calibration()
+            _usage.set_auto_calibration(
+                1_000_000, datetime(2026, 7, 19, 21, 0, tzinfo=timezone.utc),
+                10_000_000, {"Fable": 5_000_000},
+                session_reset=datetime(2026, 7, 14, 17, 0, tzinfo=timezone.utc))
+            live = [UB("five_hour", "5h", 50.0, None),
+                    UB("seven_day", "week", 30.0, None),
+                    UB("weekly_fable", "Weekly · Fable", 40.0, None)]
+            base = {"weighted": 100_000.0, "week_weighted": 1_000_000.0,
+                    "week_model": {"Fable": 500_000.0}}
+            snap_p = UsageSnapshot(updated_at=datetime.now())
+            snap_p.weighted = 150_000.0            # +50k of 1M budget -> +5 pp
+            snap_p.week_weighted = 1_200_000.0     # +200k of 10M -> +2 pp
+            snap_p.week_by_model_weighted = {"Fable": 750_000.0}  # +250k/5M -> +5 pp
+            shown = _project_buckets(live, base, snap_p)
+            got = {b.key: round(b.pct, 1) for b in shown}
+            assert got == {"five_hour": 55.0, "seven_day": 32.0,
+                           "weekly_fable": 45.0}, got
+            snap_p.weighted = 50_000.0             # counter SHRANK (reset/rewrite)
+            shown = _project_buckets(live, base, snap_p)
+            assert shown[0].pct == 50.0, "projection must never go below live"
+            snap_p.weighted = 10_000_000.0         # huge delta -> clamped
+            assert _project_buckets(live, base, snap_p)[0].pct == 100.0
+            # mtime-aware reload: an EXTERNAL write is picked up lazily
+            _usage.CALIBRATION_FILE.write_text(
+                json.dumps({"budget_5h": 777_000, "weekly_budget": None,
+                            "models": {}, "anchor": None,
+                            "session_reset": None}), encoding="utf-8")
+            import os as _os
+            _os.utime(_usage.CALIBRATION_FILE, ns=(
+                _usage.CALIBRATION_FILE.stat().st_atime_ns,
+                _usage.CALIBRATION_FILE.stat().st_mtime_ns + 1_000_000))
+            assert _usage.effective_max_tokens() == 777_000, \
+                "external calibration write must be picked up without restart"
+            _usage.reset_auto_calibration()
+    finally:
+        (_usage.CALIBRATION_FILE, _usage._calibration_loaded,
+         _usage._calibration_mtime) = cal_bk2
+    # a single failed poll must keep the live buckets (grace: 3 fails + 2x poll)
+    cache_bk2 = dict(api_mod._api_cache)
+    api_mod._api_cache.update(buckets=[UB("five_hour", "5h", 50.0, None)],
+                              ts=time.time() - 100, fails=1, base=None)
+    assert api_mod._api_cache["buckets"] is not None
+    api_mod._api_cache.update(cache_bk2)
+    print("[selftest] live-first projection + reload OK")
+
     print("[selftest] OK")
     del app
     return 0

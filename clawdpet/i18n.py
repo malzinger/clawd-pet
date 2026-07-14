@@ -202,6 +202,7 @@ STRINGS = {
         # --- live-status line (usage accuracy fixes) ---
         "src_uncalibrated": "lokal – unkalibriert, grobe Werte",
         "src_rate_limited": "Live-Sync pausiert bis {t} (Rate-Limit)",
+        "src_live_proj": "live {t} + Projektion",
         # --- X1: Codex integration ---
         "row_codex_week": "Codex · Woche",
         "row_codex_hours": "Codex · {h}h-Limit",
@@ -366,6 +367,7 @@ STRINGS = {
         # --- live-status line (usage accuracy fixes) ---
         "src_uncalibrated": "local – uncalibrated, rough numbers",
         "src_rate_limited": "live sync paused until {t} (rate limited)",
+        "src_live_proj": "live {t} + projection",
         # --- X1: Codex integration ---
         "row_codex_week": "Codex · week",
         "row_codex_hours": "Codex · {h}h limit",

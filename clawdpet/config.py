@@ -109,7 +109,7 @@ RATE_LIMIT_BASE_S = 300.0          # a 429 pauses live polling at least this lon
 RATE_LIMIT_MAX_S = 3600.0          # cap for Retry-After and the 429 back-off
 API_RETRY_S = 5.0                  # base back-off after a failed usage fetch
 API_MAX_BACKOFF_S = 120.0          # cap the exponential back-off on repeated failures
-API_STALE_S = 180.0                # keep showing the last live % up to this long, then estimate
+API_STALE_S = 180.0                # legacy (pre-projection); kept for external scripts
 
 ORG_NAME = "ClawdPet"
 APP_NAME = "Clawd"

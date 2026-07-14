@@ -58,6 +58,7 @@ class UsageSnapshot:
     by_project_weighted: dict = field(default_factory=dict)
     live_state: str = ""                          # why live is (un)available, see api.live_status
     live_until: Optional[datetime] = None         # rate-limit pause end, if known
+    live_fetched_at: Optional[datetime] = None    # when the shown live buckets were fetched
     codex_buckets: Optional[list] = None          # Codex rate limits (X1), or None
     anthropic_sick: bool = False                  # status.anthropic.com incident
 
@@ -80,14 +81,27 @@ _SESSION_ANCHOR: Optional[datetime] = None      # one known 5h reset boundary (l
 # the estimate was off by orders of magnitude. Persisted best-effort instead.
 CALIBRATION_FILE = Path.home() / ".clawd" / "calibration.json"
 _calibration_loaded = False
+_calibration_mtime = None
 
 
 def _load_calibration() -> None:
+    """Load (or re-load) the calibration file.
+
+    mtime-aware: several processes share this file (the pet, probes, a
+    second instance), and a process that cached its state once used to keep
+    stale budgets forever. Now any external write is picked up on the next
+    access — i.e. within one 2 s scan cycle."""
     global _calibration_loaded, _AUTO_BUDGET_5H, _WEEKLY_ANCHOR
     global _WEEKLY_BUDGET_ALL, _WEEKLY_BUDGET_MODELS, _SESSION_ANCHOR
-    if _calibration_loaded:
+    global _calibration_mtime
+    try:
+        mtime = CALIBRATION_FILE.stat().st_mtime_ns
+    except OSError:
+        mtime = None
+    if _calibration_loaded and mtime == _calibration_mtime:
         return
     _calibration_loaded = True
+    _calibration_mtime = mtime
     try:
         data = json.loads(CALIBRATION_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -177,10 +191,12 @@ def reset_auto_calibration() -> None:
     _WEEKLY_BUDGET_ALL = None
     _WEEKLY_BUDGET_MODELS = {}
     _SESSION_ANCHOR = None
+    global _calibration_mtime
     try:
         CALIBRATION_FILE.unlink()
     except OSError:
         pass
+    _calibration_mtime = None
 
 
 def auto_calibration() -> dict:

@@ -776,8 +776,8 @@ def run_selftest() -> int:
         if not fits and not _strict:
             # headless Windows has no Segoe UI; the wider fallback font may
             # clip — same tolerance as the title clip check above
-            print(f"[selftest] WARN: cost/projects clip under fallback "
-                  f"font tolerated: {w.text()[:40]!r}")
+            print("[selftest] WARN: cost/projects clip under fallback "
+                  "font tolerated: " + ascii(w.text()[:40]))
             continue
         assert fits, f"cost/projects label clipped: {w.text()[:40]!r}"
     xpanel.hide()

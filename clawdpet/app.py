@@ -79,6 +79,7 @@ from .config import (
 from .focus import focus_terminal
 from .history import HistoryStore
 from .macdock import hide_dock_icon
+from .macwindows import window_tracking_available
 from .hooks import (
     ensure_hook_token,
     hook_command,
@@ -91,7 +92,15 @@ from .hooks import (
     unregister_hooks,
     unregister_permission_hook,
 )
-from .permission_bubble import PermissionBubble
+from .permission_bubble import DECIDE_S, PermissionBubble
+from .telegram_approval import (
+    REMOTE_WINDOW_S,
+    load_config as tg_load_config,
+    remote_watch as tg_remote_watch,
+    remove_config as tg_remove_config,
+    save_config as tg_save_config,
+    telegram_configured,
+)
 from .status_check import anthropic_sick
 from .statusline import (
     register_statusline,
@@ -109,6 +118,7 @@ from .i18n import (
 )
 from .moods import mood_for_pct
 from .notify import post_notification
+from . import progress
 from .panel import PanelWidget
 from .pet import PetWidget
 from .update import UpdateThread, is_trusted_update_url, version_is_newer
@@ -208,6 +218,7 @@ class ClawdApp:
         self.wander = self.settings.value("wander", False, type=bool)
         self.click_through = self.settings.value("click_through", False, type=bool)
         self.cursor_chase = self.settings.value("cursor_chase", False, type=bool)
+        self.window_sit = self.settings.value("window_sit", False, type=bool)
         self._was_sick = False           # Anthropic incident edge detection
         # burn-rate history and last pct are kept PER SOURCE ("api"/"logs"):
         # the two modes report on different absolute scales, so cross-comparing
@@ -216,6 +227,11 @@ class ClawdApp:
         # the forecast and the threshold toasts would go dark for minutes.
         self._burn_samples = {}          # source -> list[(utc time, pct)]
         self._prev_pct = {}              # source -> last pct seen
+        # G: gamification — previous scan's weekly weighted counter. The
+        # weekly counter is monotonic within a week and survives 5h-window
+        # resets, so per-scan deltas feed the pet's XP; a shrinking value
+        # means a new weekly window and only re-arms the baseline.
+        self._prev_week_weighted: Optional[float] = None
         self.history = HistoryStore()
         self.check_updates = self.settings.value(
             "check_updates", UPDATE_CHECK, type=bool)
@@ -237,6 +253,12 @@ class ClawdApp:
         self._subagent_count = 0
         self._compacting = False
         self._context_pct: Optional[float] = None
+        # remote approval (Telegram): worker thread results land in a queue
+        # that this GUI-side timer drains while a request is pending
+        self._remote_watch = None
+        self._remote_timer = QTimer()
+        self._remote_timer.setInterval(250)
+        self._remote_timer.timeout.connect(self._drain_remote_decisions)
         self._activity_timer = QTimer()
         self._activity_timer.setInterval(ACTIVITY_POLL_MS)
         self._activity_timer.timeout.connect(self._check_activity)
@@ -289,6 +311,8 @@ class ClawdApp:
         self.pet.enable_wander(self.wander)          # F5 (opt-in)
         self.pet.set_click_through(self.click_through)   # F8 (opt-in)
         self.pet.enable_cursor_chase(self.cursor_chase)  # Y (opt-in)
+        if self.window_sit and window_tracking_available():
+            self.pet.enable_window_sitting(True)         # W (opt-in)
 
     # -------------------------------------------------- lifecycle
 
@@ -389,6 +413,14 @@ class ClawdApp:
         act_sound_test.triggered.connect(self.test_sound)
         menu.addAction(act_sound_test)
 
+        if telegram_configured():
+            act_tg = QAction(tr("menu_tg_off"), menu)
+            act_tg.triggered.connect(self.remove_telegram)
+        else:
+            act_tg = QAction(tr("menu_tg_on"), menu)
+            act_tg.triggered.connect(self.setup_telegram)
+        menu.addAction(act_tg)
+
         if hooks_registered(CLAUDE_SETTINGS_FILE):
             act_hooks = QAction(tr("menu_hooks_off"), menu)
             act_hooks.triggered.connect(self.disable_hooks)
@@ -469,6 +501,13 @@ class ClawdApp:
         act_chase.triggered.connect(self.toggle_cursor_chase)
         menu.addAction(act_chase)
 
+        if window_tracking_available():                 # W: shimeji mode
+            act_sit = QAction(tr("menu_window_sit"), menu)
+            act_sit.setCheckable(True)
+            act_sit.setChecked(self.window_sit)
+            act_sit.triggered.connect(self.toggle_window_sit)
+            menu.addAction(act_sit)
+
         size_menu = menu.addMenu(tr("menu_size"))    # F2: S / M / L presets
         size_group = QActionGroup(size_menu)
         size_group.setExclusive(True)
@@ -547,6 +586,15 @@ class ClawdApp:
             snap.burn_eta = burn_eta(samples)
             self._notify_transition(snap.source, snap.pct)
             self.history.add(now, snap.pct)
+            # G: gamification — feed the weekly-counter growth to the pet.
+            # Only while the same weekly window is still active: a shrunken
+            # counter means a new window, so just re-arm the baseline.
+            prev_ww = self._prev_week_weighted
+            self._prev_week_weighted = snap.week_weighted
+            if prev_ww is not None and snap.week_weighted >= prev_ww:
+                event = progress.add_usage(snap.week_weighted - prev_ww)
+                if event is not None:
+                    self._on_level_up(event)
         sick = bool(getattr(snap, "anthropic_sick", False))
         if sick != self._was_sick:
             self._was_sick = sick
@@ -688,12 +736,79 @@ class ClawdApp:
             return
         tool = str(query.get("tool_name") or "?")
         detail = str(query.get("detail") or "")
-        self._reply_perm(host, port, {"id": qid, "type": "ack"})
-        self.perm_bubble.ask(
-            tool, detail, self.pet,
-            on_decide=lambda decision: self._reply_perm(
-                host, port, {"id": qid, "type": "decision",
-                             "decision": decision}))
+        tg_cfg = tg_load_config()
+        window = REMOTE_WINDOW_S if tg_cfg else DECIDE_S + 1.0
+        self._reply_perm(host, port, {"id": qid, "type": "ack",
+                                      "window_s": window})
+
+        def _decide(decision: str, _qid=qid, _host=host, _port=port):
+            self._reply_perm(_host, _port, {"id": _qid, "type": "decision",
+                                            "decision": decision})
+            self._stop_remote_watch(answered_locally=(decision != "pass"))
+
+        self.perm_bubble.ask(tool, detail, self.pet, on_decide=_decide,
+                             window_s=max(DECIDE_S, window - 2.0))
+        if tg_cfg:
+            self._start_remote_watch(tg_cfg, qid, tool, detail, window)
+
+    # ---------------------------------------- remote approval (Telegram)
+
+    def _start_remote_watch(self, cfg, qid, tool, detail, window):
+        """Ask the phone too — whichever channel answers first wins."""
+        import queue as _queue
+        import threading as _threading
+        self._stop_remote_watch(answered_locally=False)
+        stop = _threading.Event()
+        results: "_queue.Queue" = _queue.Queue()
+        deadline = time.monotonic() + window - 1.0
+        t = _threading.Thread(
+            target=tg_remote_watch, daemon=True,
+            args=(cfg, qid, tool, detail, stop, deadline, results.put))
+        self._remote_watch = {"stop": stop, "queue": results, "qid": qid}
+        t.start()
+        self._remote_timer.start()
+
+    def _stop_remote_watch(self, answered_locally: bool):
+        watch = getattr(self, "_remote_watch", None)
+        if watch is None:
+            return
+        if answered_locally:
+            watch["stop"].set()        # thread edits the card to 'answered'
+        self._remote_watch = None
+        self._remote_timer.stop()
+
+    def _drain_remote_decisions(self):
+        """GUI-thread side of the phone channel: apply the first decision."""
+        watch = getattr(self, "_remote_watch", None)
+        if watch is None:
+            self._remote_timer.stop()
+            return
+        try:
+            decision = watch["queue"].get_nowait()
+        except Exception:
+            return
+        if decision in ("allow", "deny") and self.perm_bubble.active:
+            self.perm_bubble.decide(decision)   # routes through _decide
+        self._remote_watch = None
+        self._remote_timer.stop()
+
+    def setup_telegram(self):
+        """Two-step dialog: bot token (from @BotFather), then the chat id."""
+        token, ok = QInputDialog.getText(
+            None, tr("tg_title"), tr("tg_token_prompt"))
+        if not ok or not token.strip():
+            return
+        chat, ok = QInputDialog.getText(
+            None, tr("tg_title"), tr("tg_chat_prompt"))
+        if not ok or not chat.strip():
+            return
+        if tg_save_config(token, chat):
+            QMessageBox.information(None, tr("tg_title"), tr("tg_saved"))
+        self._rebuild_tray_menu()
+
+    def remove_telegram(self):
+        tg_remove_config()
+        self._rebuild_tray_menu()
 
     def _handle_hook_event(self, event: dict):
         name = event.get("hook_event_name") or ""
@@ -824,6 +939,11 @@ class ClawdApp:
         self.settings.setValue("wander", self.wander)
         self.pet.enable_wander(self.wander)
         self._rebuild_tray_menu()
+
+    def toggle_window_sit(self):
+        self.window_sit = not self.window_sit
+        self.settings.setValue("window_sit", self.window_sit)
+        self.pet.enable_window_sitting(self.window_sit)
 
     def toggle_cursor_chase(self):
         self.cursor_chase = not self.cursor_chase
@@ -960,6 +1080,22 @@ class ClawdApp:
             self.tray.showMessage(tr(f"notify_{kind}_title"),
                                   tr(f"notify_{kind}_text"), icon, 6000)
 
+    def _on_level_up(self, event: dict):
+        """G: the pet crossed a level — party hop + a toast with its new title.
+
+        Same etiquette as the reset celebration: DND mutes everything, the
+        notification toggle gates the toast, native notification first."""
+        if self.dnd:
+            return
+        self.pet.celebrate()
+        if self.tray is None or not self.notify_enabled:
+            return
+        title = tr("levelup_title", n=event["level"])
+        text = tr("levelup_text", title=event["title"])
+        self._last_toast_was_update = False   # this balloon is not the update one
+        if not post_notification(title, text):
+            self.tray.showMessage(title, text, QSystemTrayIcon.Information, 6000)
+
     def enable_hooks(self):
         command = hook_command()
         if not command:
@@ -1054,6 +1190,17 @@ class ClawdApp:
         from .hooks import _hook_runner
         runner = _hook_runner()
         script = Path(__file__).resolve().parent.parent / "codex_notify.py"
+        if getattr(sys, "frozen", False):
+            # the bundle payload dir is temporary — config.toml needs a path
+            # that survives, so the sender is copied next to our other state
+            src = Path(getattr(sys, "_MEIPASS", "")) / "codex_notify.py"
+            script = Path.home() / ".clawd" / "codex_notify.py"
+            try:
+                script.parent.mkdir(parents=True, exist_ok=True)
+                import shutil as _sh
+                _sh.copy2(src, script)
+            except OSError:
+                return
         if not runner or not script.is_file():
             return
         line = codex_notify_command(runner, script)

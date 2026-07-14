@@ -203,6 +203,17 @@ STRINGS = {
         "src_uncalibrated": "lokal – unkalibriert, grobe Werte",
         "src_rate_limited": "Live-Sync pausiert bis {t} (Rate-Limit)",
         "src_live_proj": "live {t} + Projektion",
+        # --- Telegram remote approval ---
+        "menu_tg_on": "Telegram-Freigabe einrichten …",
+        "menu_tg_off": "Telegram-Freigabe entfernen",
+        "tg_title": "Telegram-Freigabe",
+        "tg_token_prompt": "Bot-Token einfügen (bei @BotFather einen Bot\n"
+                           "anlegen, den Token hierher kopieren):",
+        "tg_chat_prompt": "Chat-ID eingeben (dem Bot etwas schreiben und\n"
+                          "https://api.telegram.org/bot<TOKEN>/getUpdates\n"
+                          "öffnen — die ID steht unter message.chat.id):",
+        "tg_saved": "Telegram-Freigabe aktiv: Berechtigungsfragen kommen\n"
+                    "jetzt zusätzlich aufs Handy (erste Antwort gewinnt).",
         # --- X1: Codex integration ---
         "row_codex_week": "Codex · Woche",
         "row_codex_hours": "Codex · {h}h-Limit",
@@ -235,6 +246,12 @@ STRINGS = {
                                    "überschreibt sie nicht — bitte zuerst manuell "
                                    "entfernen.",
         "row_context": "Kontext-Fenster",
+        # --- G: gamification ---
+        "levelup_title": "Level {n}!",
+        "levelup_text": "Clawd ist jetzt {title}.",
+        "progress_line": "Level {n} · {title} · {xp} XP (nächstes: {nxt})",
+        # --- W: window sitting ---
+        "menu_window_sit": "Auf Fenstern sitzen",
     },
     "en": {
         "panel_title": "Plan usage limits · {plan}",
@@ -368,6 +385,17 @@ STRINGS = {
         "src_uncalibrated": "local – uncalibrated, rough numbers",
         "src_rate_limited": "live sync paused until {t} (rate limited)",
         "src_live_proj": "live {t} + projection",
+        # --- Telegram remote approval ---
+        "menu_tg_on": "Set up Telegram approval …",
+        "menu_tg_off": "Remove Telegram approval",
+        "tg_title": "Telegram approval",
+        "tg_token_prompt": "Paste the bot token (create a bot with\n"
+                           "@BotFather and copy its token here):",
+        "tg_chat_prompt": "Enter the chat id (message your bot once, open\n"
+                          "https://api.telegram.org/bot<TOKEN>/getUpdates —\n"
+                          "the id is at message.chat.id):",
+        "tg_saved": "Telegram approval active: permission questions now\n"
+                    "also reach your phone (first answer wins).",
         # --- X1: Codex integration ---
         "row_codex_week": "Codex · week",
         "row_codex_hours": "Codex · {h}h limit",
@@ -398,6 +426,12 @@ STRINGS = {
                                    "custom status line.\nClawd will not overwrite "
                                    "it — please remove it manually first.",
         "row_context": "Context window",
+        # --- G: gamification ---
+        "levelup_title": "Level {n}!",
+        "levelup_text": "Clawd is now a {title}.",
+        "progress_line": "Level {n} · {title} · {xp} XP (next: {nxt})",
+        # --- W: window sitting ---
+        "menu_window_sit": "Sit on windows",
     },
 }
 

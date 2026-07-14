@@ -21,13 +21,15 @@ import os
 import secrets
 import socket
 import sys
+import time
 from pathlib import Path
 
 PORT = int(os.environ.get("CLAWD_PET_PORT", "52741"))
 TOKEN_FILE = Path(os.environ.get("CLAWD_TOKEN_FILE",
                                  str(Path.home() / ".clawd" / "hook_token")))
 ACK_TIMEOUT_S = 0.5        # pet must confirm this fast, else terminal prompt
-DECISION_TIMEOUT_S = 15.0  # how long the user may take to click
+DECISION_TIMEOUT_S = 15.0  # default decision window (pet may extend via ack)
+MAX_WINDOW_S = 300.0       # hard cap on a pet-announced window
 
 
 def _detail(tool: str, inp) -> str:
@@ -96,11 +98,21 @@ def main() -> int:
         ack = _recv(sock, token, qid)
         if not ack or ack.get("type") != "ack":
             return 0                   # pet absent/busy -> terminal prompt
-        sock.settimeout(DECISION_TIMEOUT_S)
+        # the pet may announce a longer decision window in the ack (e.g. when
+        # a remote-approval channel like Telegram is configured); absent or
+        # bogus values keep the classic 15 s
+        window = ack.get("window_s")
+        if not isinstance(window, (int, float)) or not (0 < window <= MAX_WINDOW_S):
+            window = DECISION_TIMEOUT_S
+        deadline = time.monotonic() + float(window)
         while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return 0               # nobody decided in time
+            sock.settimeout(min(left, 2.0))
             reply = _recv(sock, token, qid)
             if reply is None:
-                return 0               # user did not click in time
+                continue               # poll again until the deadline
             if reply.get("type") != "decision":
                 continue
             decision = reply.get("decision")

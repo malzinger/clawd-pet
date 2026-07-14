@@ -34,6 +34,7 @@ from .config import (
 )
 from .history import HistoryChart
 from .i18n import _fmt_dur, fmt_de, fmt_pct_de, tool_action, tr
+from . import progress
 from .moods import MOOD_COLORS, mood_for_pct
 from .usage import (
     UsageSnapshot,
@@ -196,6 +197,10 @@ class PanelWidget(QWidget):
         self.incident_label.setWordWrap(True)
         self.incident_label.setVisible(False)
         lay.addWidget(self.incident_label)
+        self.progress_label = QLabel("")  # G: gamification level/XP line
+        self.progress_label.setObjectName("sub")
+        self.progress_label.setWordWrap(True)
+        lay.addWidget(self.progress_label)
         self.forecast_label = QLabel("")
         self.forecast_label.setObjectName("sub")
         self.forecast_label.setWordWrap(True)
@@ -541,6 +546,16 @@ class PanelWidget(QWidget):
                 + (f" ({reset})" if reset else ""))
         self.codex_label.setText(rows)
         self.codex_label.setVisible(bool(rows))
+
+        # G: gamification progress line — hidden until the pet earned any XP
+        cur = progress.current()
+        if cur["xp"] > 0:
+            self.progress_label.setText(tr(
+                "progress_line", n=cur["level"], title=cur["title"],
+                xp=fmt_de(int(cur["xp"])), nxt=fmt_de(int(cur["next_level_xp"]))))
+        else:
+            self.progress_label.setText("")
+        self.progress_label.setVisible(bool(self.progress_label.text()))
 
     def _update_forecast(self, snap: UsageSnapshot):
         """Burn-rate line: projected time of hitting the 5-hour limit."""

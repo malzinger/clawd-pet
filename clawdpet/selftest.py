@@ -2040,6 +2040,40 @@ def run_selftest() -> int:
         assert "menu_window_sit" in _wstrings[_lang], _lang
     print("[selftest] window sitting OK")
 
+    # --- motion gates: focus must not paralyze wander/chase/sit -----------
+    pet.set_activity(None)
+    pet.set_generating(False)
+    pet.set_pct(60)                                   # "focus" quota mood
+    assert pet._quota_mood == "focus", pet._quota_mood
+    assert pet._calm_enough(), "focus is calm enough for motion features"
+    assert not pet._chase_blocked(), "chase must work at 60 % usage"
+    pet.set_pct(90)                                   # "panic" still blocks
+    assert not pet._calm_enough()
+    assert pet._chase_blocked()
+    pet.set_pct(60)
+    pet.set_activity(("working", "Edit"))             # Claude works ...
+    assert not pet._window_sit_blocked(), \
+        "sitting on a window must survive Claude working"
+    pet.set_activity(None)
+    pet.set_pct(10)
+    # progress line is always visible now (level 0 is a valid state)
+    from . import progress as progress_mod
+    st_bk = (progress_mod.STATE_FILE, progress_mod._state_loaded,
+             progress_mod._xp, progress_mod._state_mtime)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            progress_mod.STATE_FILE = Path(td) / "state.json"
+            progress_mod._state_loaded = True
+            progress_mod._state_mtime = None
+            progress_mod._xp = 0.0
+            panel._update_extras(UsageSnapshot(updated_at=datetime.now()))
+            assert panel.progress_label.isVisibleTo(panel)
+            assert "Level 0" in panel.progress_label.text()
+    finally:
+        (progress_mod.STATE_FILE, progress_mod._state_loaded,
+         progress_mod._xp, progress_mod._state_mtime) = st_bk
+    print("[selftest] motion gates + visible progress OK")
+
     print("[selftest] OK")
     del app
     return 0

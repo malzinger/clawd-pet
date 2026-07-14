@@ -412,3 +412,133 @@ def make_app_icon(mood: str = "chill") -> QIcon:
     if pm is not None:
         return QIcon(pm)
     return make_clawd_icon(mood)
+
+
+# ======================================================================
+#  Sprite-pack import (Y) — petdex / "Codex pet" community packs
+# ======================================================================
+
+# Community packs (petdex.dev, clawd-on-desk "Codex pet" zips, hand-made
+# folders) name their animations by STATE, not by our gif filenames. This
+# maps the state names seen in the wild onto our mood keys; the first file
+# matching a mood wins. Substring match, longest names first, so "sleeping"
+# beats "sleep" beats "s".
+PACK_STATE_MOODS = {
+    "idle": "chill", "default": "chill", "stand": "chill",
+    "walk": "carry", "walking": "carry", "move": "carry", "run": "carry",
+    "carry": "carry", "carrying": "carry",
+    "sleep": "sleep", "sleeping": "sleep", "rest": "sleep",
+    "celebrate": "happy", "dance": "happy", "happy": "happy", "cheer": "happy",
+    "work": "focus", "working": "focus", "build": "focus", "building": "focus",
+    "think": "think", "thinking": "think",
+    "type": "type", "typing": "type",
+    "read": "read", "reading": "read",
+    "error": "panic", "panic": "panic", "debug": "panic", "sad": "panic",
+    "notify": "notify", "alert": "notify", "wave": "notify",
+    "pet": "pet", "jump": "pet",
+    "annoyed": "annoyed", "angry": "annoyed", "grumpy": "annoyed",
+    "juggle": "juggle", "juggling": "juggle",
+    "conduct": "conduct", "conducting": "conduct",
+    "sweep": "sweep", "sweeping": "sweep", "clean": "sweep",
+    "limit": "limit", "dead": "limit",
+}
+_PACK_EXTS = (".gif", ".png", ".webp", ".apng")
+
+
+def _pack_mood_for(name: str) -> Optional[str]:
+    stem = Path(name).stem.lower().replace("_", "-")
+    for prefix in ("clawd-", "pet-", "codex-"):
+        if stem.startswith(prefix):
+            stem = stem[len(prefix):]
+    for state in sorted(PACK_STATE_MOODS, key=len, reverse=True):
+        if state in stem:
+            return PACK_STATE_MOODS[state]
+    return None
+
+
+def _pack_sources(src: Path) -> dict:
+    """mood -> source file, from a manifest.json when present, else by name."""
+    out = {}
+    manifest = src / "manifest.json"
+    if manifest.is_file():
+        import json
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None
+        states = None
+        if isinstance(data, dict):
+            for key in ("states", "animations", "sprites"):
+                if isinstance(data.get(key), dict):
+                    states = data[key]
+                    break
+        if states:
+            for state, fname in states.items():
+                if not isinstance(fname, str):
+                    continue
+                mood = (PACK_STATE_MOODS.get(str(state).lower())
+                        or _pack_mood_for(str(state)))
+                fp = src / fname
+                if mood and mood not in out and fp.is_file():
+                    out[mood] = fp
+            if out:
+                return out
+    for fp in sorted(src.rglob("*")):
+        if not fp.is_file() or fp.suffix.lower() not in _PACK_EXTS:
+            continue
+        mood = _pack_mood_for(fp.name)
+        if mood and mood not in out:
+            out[mood] = fp
+    return out
+
+
+def import_sprite_pack(path, dest_root: Optional[Path] = None) -> Optional[Path]:
+    """Convert a community sprite pack (folder or .zip) into a folder our
+    SpriteSet can load, under ~/.clawd/sprite_packs/<name>/ (or dest_root).
+
+    Best effort: unknown states are skipped (SpriteSet falls back to idle),
+    but a pack without an idle animation is rejected. Returns the resulting
+    sprite_dir, or None when nothing usable was found. Pure logic, no Qt
+    dialogs — QImageReader sniffs content, so .png/.webp sources may keep
+    their bytes under our .gif target names.
+    """
+    import shutil
+    import tempfile
+    import zipfile
+    src = Path(path)
+    if dest_root is None:
+        dest_root = Path.home() / ".clawd" / "sprite_packs"
+    tmp = None
+    try:
+        if src.is_file() and src.suffix.lower() == ".zip":
+            tmp = tempfile.TemporaryDirectory(prefix="clawd-pack-")
+            try:
+                with zipfile.ZipFile(src) as zf:
+                    zf.extractall(tmp.name)   # noqa: S202 — local user archive
+            except (OSError, zipfile.BadZipFile):
+                return None
+            root = Path(tmp.name)
+            entries = [e for e in root.iterdir() if not e.name.startswith(".")]
+            src_dir = entries[0] if len(entries) == 1 and entries[0].is_dir() else root
+        elif src.is_dir():
+            src_dir = src
+        else:
+            return None
+        sources = _pack_sources(src_dir)
+        if "chill" not in sources:        # no idle animation -> unusable pack
+            return None
+        name = "".join(c if c.isalnum() or c in "-_" else "-"
+                       for c in src.stem).strip("-") or "pack"
+        dest = dest_root / name
+        try:
+            if dest.is_dir():
+                shutil.rmtree(dest)       # replace an older import of this pack
+            dest.mkdir(parents=True, exist_ok=True)
+            for mood, fp in sources.items():
+                shutil.copy2(fp, dest / SPRITE_FILES[mood])
+        except OSError:
+            return None
+        return dest
+    finally:
+        if tmp is not None:
+            tmp.cleanup()

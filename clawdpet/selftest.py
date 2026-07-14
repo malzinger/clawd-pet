@@ -1433,6 +1433,93 @@ def run_selftest() -> int:
     capp.panel.set_context(None)
     print("[selftest] X2 panel context row OK")
 
+    # --- Y: idle throttle / cursor chase / typing bob / celebrate ---------
+    from PyQt5.QtCore import QPoint
+    from .config import THROTTLE_TICK_MS
+    pet.set_activity(None)
+    pet.set_pct(10)                                   # chill quota mood
+    pet._idle_variant = None
+    pet.enable_wander(False)
+    pet._update_mood()
+    pet._last_active_mono = time.monotonic() - 999    # long idle
+    pet._maybe_throttle()
+    assert pet.throttled, "idle pet must throttle its animation timer"
+    assert pet._anim_timer.interval() == THROTTLE_TICK_MS
+    pet.set_activity(("working", "Edit"))             # any life -> full rate
+    assert not pet.throttled, "activity must restore the frame rate instantly"
+    pet.set_activity(None)
+    print("[selftest] idle throttle OK")
+
+    pet.enable_cursor_chase(True)
+    avail = pet._screen_avail()
+    pet.move(avail.left() + 10, avail.center().y())  # room to walk right
+    start_x = pet.x()
+    pet._chase_test_target = QPoint(pet.x() + pet.width() // 2 + 400,
+                                    avail.center().y())
+    pet._chase_next = 0.0                             # due immediately
+    pet._chase_tick()
+    assert pet._chase_state == "chase", pet._chase_state
+    for _ in range(30):
+        pet._chase_tick()
+    assert pet.x() > start_x, "chase must move the pet toward the cursor"
+    pet._chase_test_target = QPoint(pet.x() + pet.width() // 2, pet.y())
+    pet._chase_tick()                                 # within catch radius
+    assert pet._chase_state == "caught"
+    assert pet.mood == "sleep", "caught cursor -> nap on it"
+    pet._chase_test_target = QPoint(pet.x() + pet.width() // 2 + 500, pet.y())
+    pet._chase_tick()                                 # it escaped
+    assert pet._chase_state == "wait" and pet.mood != "sleep"
+    pet._chase_test_target = None
+    pet.enable_cursor_chase(False)
+    print("[selftest] cursor chase OK")
+
+    pet.set_generating(True)
+    assert pet._generating
+    assert pet.grab() is not None                     # bob path paints fine
+    pet.set_generating(False)
+    assert not pet._generating
+    assert pet.celebrate() is True
+    assert pet._react_active and pet.mood in ("conduct", "juggle", "happy")
+    assert pet.celebrate() is False                   # idempotent while playing
+    pet._stop_throw()                                 # cancel the hop
+    pet._end_reaction()
+    assert not pet._celebrating
+    print("[selftest] typing bob + celebrate OK")
+
+    # --- Y: sprite-pack import (petdex / Codex pet format) ----------------
+    from .art import _pack_mood_for, import_sprite_pack
+    import base64
+    tiny_gif = base64.b64decode(
+        b"R0lGODlhAgACAPAAAP8AAAAAACH5BAAAAAAALAAAAAACAAIAAAICRAEAOw==")
+    assert _pack_mood_for("cat-idle.gif") == "chill"
+    assert _pack_mood_for("clawd-sleeping.gif") == "sleep"
+    assert _pack_mood_for("random-noise.gif") is None
+    with tempfile.TemporaryDirectory() as td:
+        packs = Path(td) / "packs"
+        srcd = Path(td) / "my-pack"
+        srcd.mkdir()
+        (srcd / "idle.gif").write_bytes(tiny_gif)
+        (srcd / "sleeping.gif").write_bytes(tiny_gif)
+        dest = import_sprite_pack(srcd, dest_root=packs)
+        assert dest is not None and (dest / "clawd-idle.gif").is_file()
+        assert (dest / "clawd-sleeping.gif").is_file()
+        loaded = SpriteSet(height=32, sprite_dir=dest)
+        assert "chill" in loaded.sprites, "imported pack must load"
+        # manifest wins over name sniffing
+        srcm = Path(td) / "manifest-pack"
+        srcm.mkdir()
+        (srcm / "a.gif").write_bytes(tiny_gif)
+        (srcm / "manifest.json").write_text('{"states": {"idle": "a.gif"}}')
+        dest2 = import_sprite_pack(srcm, dest_root=packs)
+        assert dest2 is not None and (dest2 / "clawd-idle.gif").is_file()
+        # no idle -> rejected; garbage -> rejected
+        srcb = Path(td) / "bad-pack"
+        srcb.mkdir()
+        (srcb / "sleeping.gif").write_bytes(tiny_gif)
+        assert import_sprite_pack(srcb, dest_root=packs) is None
+        assert import_sprite_pack(Path(td) / "missing", dest_root=packs) is None
+    print("[selftest] sprite-pack import OK")
+
     print("[selftest] OK")
     del app
     return 0

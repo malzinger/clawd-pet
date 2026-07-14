@@ -189,3 +189,16 @@ HOOK_EVENTS += [
 # the panel hides its context row when no update arrived for this long.
 CONTEXT_STALE_S = 120
 
+# --- Y: pet behaviors (idle throttle, cursor chase, typing bob, celebrate) ---
+THROTTLE_IDLE_S = 60.0      # fully idle this long -> slow the animation timer
+THROTTLE_TICK_MS = 250      # throttled frame interval (vs. ANIM_TICK_MS 33)
+CHASE_TICK_MS = 50          # cursor-chase state machine tick
+CHASE_SPEED_PX = 3.2        # px per tick while chasing (a bit faster than wander)
+CHASE_WAIT_RANGE_S = (30.0, 90.0)   # pause between chase attempts
+CHASE_STOP_SHORT_PX = 30    # never park ON the cursor — stop this short of it
+CHASE_RELEASE_PX = 120      # cursor moved this far -> wake up and let go
+TYPING_BOB_PERIOD_MS = 125  # ~8 Hz typing-along bob while Claude generates
+TYPING_BOB_PX = 2
+CELEBRATE_MS = 3000         # length of the one-shot celebration
+CELEBRATE_HOP_V = 260.0     # upward hop speed (reuses the throw physics)
+

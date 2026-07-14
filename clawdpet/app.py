@@ -91,7 +91,15 @@ from .hooks import (
     unregister_hooks,
     unregister_permission_hook,
 )
-from .permission_bubble import PermissionBubble
+from .permission_bubble import DECIDE_S, PermissionBubble
+from .telegram_approval import (
+    REMOTE_WINDOW_S,
+    load_config as tg_load_config,
+    remote_watch as tg_remote_watch,
+    remove_config as tg_remove_config,
+    save_config as tg_save_config,
+    telegram_configured,
+)
 from .status_check import anthropic_sick
 from .statusline import (
     register_statusline,
@@ -243,6 +251,12 @@ class ClawdApp:
         self._subagent_count = 0
         self._compacting = False
         self._context_pct: Optional[float] = None
+        # remote approval (Telegram): worker thread results land in a queue
+        # that this GUI-side timer drains while a request is pending
+        self._remote_watch = None
+        self._remote_timer = QTimer()
+        self._remote_timer.setInterval(250)
+        self._remote_timer.timeout.connect(self._drain_remote_decisions)
         self._activity_timer = QTimer()
         self._activity_timer.setInterval(ACTIVITY_POLL_MS)
         self._activity_timer.timeout.connect(self._check_activity)
@@ -394,6 +408,14 @@ class ClawdApp:
         act_sound_test = QAction(tr("menu_sound_test"), menu)
         act_sound_test.triggered.connect(self.test_sound)
         menu.addAction(act_sound_test)
+
+        if telegram_configured():
+            act_tg = QAction(tr("menu_tg_off"), menu)
+            act_tg.triggered.connect(self.remove_telegram)
+        else:
+            act_tg = QAction(tr("menu_tg_on"), menu)
+            act_tg.triggered.connect(self.setup_telegram)
+        menu.addAction(act_tg)
 
         if hooks_registered(CLAUDE_SETTINGS_FILE):
             act_hooks = QAction(tr("menu_hooks_off"), menu)
@@ -703,12 +725,79 @@ class ClawdApp:
             return
         tool = str(query.get("tool_name") or "?")
         detail = str(query.get("detail") or "")
-        self._reply_perm(host, port, {"id": qid, "type": "ack"})
-        self.perm_bubble.ask(
-            tool, detail, self.pet,
-            on_decide=lambda decision: self._reply_perm(
-                host, port, {"id": qid, "type": "decision",
-                             "decision": decision}))
+        tg_cfg = tg_load_config()
+        window = REMOTE_WINDOW_S if tg_cfg else DECIDE_S + 1.0
+        self._reply_perm(host, port, {"id": qid, "type": "ack",
+                                      "window_s": window})
+
+        def _decide(decision: str, _qid=qid, _host=host, _port=port):
+            self._reply_perm(_host, _port, {"id": _qid, "type": "decision",
+                                            "decision": decision})
+            self._stop_remote_watch(answered_locally=(decision != "pass"))
+
+        self.perm_bubble.ask(tool, detail, self.pet, on_decide=_decide,
+                             window_s=max(DECIDE_S, window - 2.0))
+        if tg_cfg:
+            self._start_remote_watch(tg_cfg, qid, tool, detail, window)
+
+    # ---------------------------------------- remote approval (Telegram)
+
+    def _start_remote_watch(self, cfg, qid, tool, detail, window):
+        """Ask the phone too — whichever channel answers first wins."""
+        import queue as _queue
+        import threading as _threading
+        self._stop_remote_watch(answered_locally=False)
+        stop = _threading.Event()
+        results: "_queue.Queue" = _queue.Queue()
+        deadline = time.monotonic() + window - 1.0
+        t = _threading.Thread(
+            target=tg_remote_watch, daemon=True,
+            args=(cfg, qid, tool, detail, stop, deadline, results.put))
+        self._remote_watch = {"stop": stop, "queue": results, "qid": qid}
+        t.start()
+        self._remote_timer.start()
+
+    def _stop_remote_watch(self, answered_locally: bool):
+        watch = getattr(self, "_remote_watch", None)
+        if watch is None:
+            return
+        if answered_locally:
+            watch["stop"].set()        # thread edits the card to 'answered'
+        self._remote_watch = None
+        self._remote_timer.stop()
+
+    def _drain_remote_decisions(self):
+        """GUI-thread side of the phone channel: apply the first decision."""
+        watch = getattr(self, "_remote_watch", None)
+        if watch is None:
+            self._remote_timer.stop()
+            return
+        try:
+            decision = watch["queue"].get_nowait()
+        except Exception:
+            return
+        if decision in ("allow", "deny") and self.perm_bubble.active:
+            self.perm_bubble.decide(decision)   # routes through _decide
+        self._remote_watch = None
+        self._remote_timer.stop()
+
+    def setup_telegram(self):
+        """Two-step dialog: bot token (from @BotFather), then the chat id."""
+        token, ok = QInputDialog.getText(
+            None, tr("tg_title"), tr("tg_token_prompt"))
+        if not ok or not token.strip():
+            return
+        chat, ok = QInputDialog.getText(
+            None, tr("tg_title"), tr("tg_chat_prompt"))
+        if not ok or not chat.strip():
+            return
+        if tg_save_config(token, chat):
+            QMessageBox.information(None, tr("tg_title"), tr("tg_saved"))
+        self._rebuild_tray_menu()
+
+    def remove_telegram(self):
+        tg_remove_config()
+        self._rebuild_tray_menu()
 
     def _handle_hook_event(self, event: dict):
         name = event.get("hook_event_name") or ""

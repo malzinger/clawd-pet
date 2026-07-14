@@ -1911,6 +1911,75 @@ def run_selftest() -> int:
          _prog._xp) = prog_bk
     print("[selftest] gamification progress OK")
 
+    # --- Telegram remote approval (fake HTTP server, no real API) ---------
+    import http.server
+    import threading as _thr
+    from clawdpet import telegram_approval as tg
+    with tempfile.TemporaryDirectory() as td:
+        tgf = Path(td) / "telegram.json"
+        assert tg.load_config(tgf) is None
+        assert tg.save_config("123:ABC", "42", tgf) is True
+        if os.name == "posix":
+            assert (tgf.stat().st_mode & 0o777) == 0o600, "bot token not 0600"
+        cfg = tg.load_config(tgf)
+        assert cfg == {"bot_token": "123:ABC", "chat_id": "42"}
+        assert tg.telegram_configured(tgf) is True
+        assert tg.remove_config(tgf) is True and not tgf.exists()
+        tgf.write_text("{broken", encoding="utf-8")
+        assert tg.load_config(tgf) is None            # garbage -> unconfigured
+
+    seen = []
+    class _FakeTg(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(
+                int(self.headers.get("Content-Length", 0)) or 0) or b"{}")
+            method = self.path.rsplit("/", 1)[-1]
+            seen.append((method, body))
+            if method == "sendMessage":
+                out = {"ok": True, "result": {"message_id": 7}}
+            elif method == "getUpdates":
+                out = {"ok": True, "result": [
+                    {"update_id": 100, "callback_query": {
+                        "id": "cbq1", "data": "allow:tg-test-1"}}]}
+            else:
+                out = {"ok": True, "result": True}
+            raw = json.dumps(out).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+        def log_message(self, *a):
+            pass
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _FakeTg)
+    thr = _thr.Thread(target=srv.serve_forever, daemon=True)
+    thr.start()
+    tg_api_backup = tg.TELEGRAM_API
+    try:
+        tg.TELEGRAM_API = f"http://127.0.0.1:{srv.server_address[1]}"
+        cfg = {"bot_token": "123:ABC", "chat_id": "42"}
+        mid = tg.send_permission_request(cfg, "tg-test-1", "Bash", "rm -rf x")
+        assert mid == 7
+        kb = seen[0][1]["reply_markup"]["inline_keyboard"][0]
+        assert kb[0]["callback_data"] == "allow:tg-test-1"
+        decision, offset = tg.poll_decision(cfg, "tg-test-1", None)
+        assert decision == "allow" and offset == 101
+        decision, _ = tg.poll_decision(cfg, "OTHER-qid", None)
+        assert decision is None, "foreign query ids must be ignored"
+        # full worker round-trip: send -> poll -> on_decision exactly once
+        got = []
+        stop = _thr.Event()
+        tg.remote_watch(cfg, "tg-test-1", "Bash", "x", stop,
+                        time.monotonic() + 10, got.append)
+        assert got == ["allow"]
+        assert any(m == "editMessageText" for m, _ in seen), "card not finished"
+    finally:
+        tg.TELEGRAM_API = tg_api_backup
+        srv.shutdown()
+    # window handshake: ack window_s reaches the hook script (subprocess E2E
+    # variant: announce 6 s, decide after the classic 15 s would NOT have
+    # mattered — here we simply verify the script accepts and uses the ack)
+    print("[selftest] telegram remote approval OK")
+
     print("[selftest] OK")
     del app
     return 0

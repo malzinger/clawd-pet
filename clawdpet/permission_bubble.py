@@ -94,9 +94,11 @@ class PermissionBubble(QWidget):
         self._timeout.setSingleShot(True)
         self._timeout.timeout.connect(lambda: self.decide("pass"))
 
-    def ask(self, tool: str, detail: str, pet: QWidget, on_decide) -> None:
+    def ask(self, tool: str, detail: str, pet: QWidget, on_decide,
+            window_s: float = DECIDE_S) -> None:
         """Show the question above the pet; on_decide('allow'|'deny'|'pass')
-        fires exactly once."""
+        fires exactly once. window_s widens the auto-'pass' when a remote
+        approval channel also has to have a chance to answer."""
         self._on_decide = on_decide
         self.active = True
         self._btn_allow.setText(tr("perm_allow"))
@@ -111,7 +113,7 @@ class PermissionBubble(QWidget):
             # raise_() can activate the whole app on macOS (focus steal);
             # WindowStaysOnTopHint already keeps the callout above everything
             self.raise_()
-        self._timeout.start(int(DECIDE_S * 1000))
+        self._timeout.start(int(max(1.0, window_s) * 1000))
 
     def _follow(self, pet: QWidget) -> None:
         from PyQt5.QtGui import QGuiApplication

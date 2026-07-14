@@ -109,6 +109,7 @@ from .i18n import (
 )
 from .moods import mood_for_pct
 from .notify import post_notification
+from . import progress
 from .panel import PanelWidget
 from .pet import PetWidget
 from .update import UpdateThread, is_trusted_update_url, version_is_newer
@@ -216,6 +217,11 @@ class ClawdApp:
         # the forecast and the threshold toasts would go dark for minutes.
         self._burn_samples = {}          # source -> list[(utc time, pct)]
         self._prev_pct = {}              # source -> last pct seen
+        # G: gamification — previous scan's weekly weighted counter. The
+        # weekly counter is monotonic within a week and survives 5h-window
+        # resets, so per-scan deltas feed the pet's XP; a shrinking value
+        # means a new weekly window and only re-arms the baseline.
+        self._prev_week_weighted: Optional[float] = None
         self.history = HistoryStore()
         self.check_updates = self.settings.value(
             "check_updates", UPDATE_CHECK, type=bool)
@@ -547,6 +553,15 @@ class ClawdApp:
             snap.burn_eta = burn_eta(samples)
             self._notify_transition(snap.source, snap.pct)
             self.history.add(now, snap.pct)
+            # G: gamification — feed the weekly-counter growth to the pet.
+            # Only while the same weekly window is still active: a shrunken
+            # counter means a new window, so just re-arm the baseline.
+            prev_ww = self._prev_week_weighted
+            self._prev_week_weighted = snap.week_weighted
+            if prev_ww is not None and snap.week_weighted >= prev_ww:
+                event = progress.add_usage(snap.week_weighted - prev_ww)
+                if event is not None:
+                    self._on_level_up(event)
         sick = bool(getattr(snap, "anthropic_sick", False))
         if sick != self._was_sick:
             self._was_sick = sick
@@ -959,6 +974,22 @@ class ClawdApp:
                                  tr(f"notify_{kind}_text")):
             self.tray.showMessage(tr(f"notify_{kind}_title"),
                                   tr(f"notify_{kind}_text"), icon, 6000)
+
+    def _on_level_up(self, event: dict):
+        """G: the pet crossed a level — party hop + a toast with its new title.
+
+        Same etiquette as the reset celebration: DND mutes everything, the
+        notification toggle gates the toast, native notification first."""
+        if self.dnd:
+            return
+        self.pet.celebrate()
+        if self.tray is None or not self.notify_enabled:
+            return
+        title = tr("levelup_title", n=event["level"])
+        text = tr("levelup_text", title=event["title"])
+        self._last_toast_was_update = False   # this balloon is not the update one
+        if not post_notification(title, text):
+            self.tray.showMessage(title, text, QSystemTrayIcon.Information, 6000)
 
     def enable_hooks(self):
         command = hook_command()

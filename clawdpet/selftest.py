@@ -1838,6 +1838,79 @@ def run_selftest() -> int:
     bub2.deleteLater()
     print("[selftest] no-activate raise OK")
 
+    # --- G: gamification — XP curve, events, persistence -------------------
+    from . import progress as _prog
+    prog_bk = (_prog.STATE_FILE, _prog._state_loaded, _prog._state_mtime,
+               _prog._xp)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            _prog.STATE_FILE = Path(td) / "pet_state.json"
+            _prog._state_loaded = True      # skip loading the real file
+            _prog._state_mtime = None
+            _prog._xp = 0.0
+            # level curve: exact thresholds, strictly monotonic
+            assert _prog.xp_for_level(0) == 0
+            assert _prog.xp_for_level(1) == 500
+            assert _prog.xp_for_level(2) == 1500
+            assert _prog.xp_for_level(3) == 3000
+            prev_thr = -1
+            for lv in range(31):
+                thr = _prog.xp_for_level(lv)
+                assert thr > prev_thr, "level curve must be strictly monotonic"
+                prev_thr = thr
+                assert _prog.level_for_xp(thr) == lv
+                if thr:
+                    assert _prog.level_for_xp(thr - 1) == lv - 1
+            # evolution titles by level band
+            assert _prog.title_for_level(0) == "Hatchling"
+            assert _prog.title_for_level(2) == "Hatchling"
+            assert _prog.title_for_level(3) == "Crabling"
+            assert _prog.title_for_level(5) == "Crabling"
+            assert _prog.title_for_level(6) == "Scuttler"
+            assert _prog.title_for_level(9) == "Scuttler"
+            assert _prog.title_for_level(10) == "Coder Crab"
+            assert _prog.title_for_level(15) == "Deep-Sea Dev"
+            assert _prog.title_for_level(20) == "Deep-Sea Dev"
+            assert _prog.title_for_level(21) == "Kraken Whisperer"
+            assert _prog.title_for_level(28) == "Legend"
+            assert _prog.title_for_level(99) == "Legend"
+            # add_usage accumulates; the event fires exactly on the crossing
+            assert _prog.add_usage(0) is None
+            assert _prog.add_usage(-5000) is None      # negative delta: ignored
+            assert _prog.add_usage(499_000) is None    # 499 XP — still level 0
+            ev = _prog.add_usage(1_000)                # 500 XP — level 1 crossed
+            assert ev == {"level": 1, "title": "Hatchling"}, ev
+            assert _prog.add_usage(1_000) is None      # no repeat event
+            cur = _prog.current()
+            assert cur["level"] == 1 and cur["title"] == "Hatchling"
+            assert cur["next_level_xp"] == 1500
+            assert abs(cur["xp"] - 501.0) < 1e-9
+            ev = _prog.add_usage(2_500_000)            # 501 -> 3001 XP: level 3
+            assert ev == {"level": 3, "title": "Crabling"}, ev
+            # persistence round-trip: wipe the globals, force a re-load
+            assert _prog.STATE_FILE.is_file(), "pet state not persisted"
+            _prog._xp = 0.0
+            _prog._state_loaded = False
+            _prog._state_mtime = None
+            assert abs(_prog.current()["xp"] - 3001.0) < 1e-9
+            # mtime-aware reload: an EXTERNAL write is picked up lazily
+            _prog.STATE_FILE.write_text(json.dumps({"xp": 7777.0}),
+                                        encoding="utf-8")
+            os.utime(_prog.STATE_FILE, ns=(
+                _prog.STATE_FILE.stat().st_atime_ns,
+                _prog.STATE_FILE.stat().st_mtime_ns + 1_000_000))
+            assert _prog.current()["xp"] == 7777.0, \
+                "external pet-state write must be picked up without restart"
+            # i18n: the gamification keys exist in BOTH languages
+            from .i18n import STRINGS as _strings
+            for _lang in ("de", "en"):
+                for _key in ("levelup_title", "levelup_text", "progress_line"):
+                    assert _key in _strings[_lang], (_lang, _key)
+    finally:
+        (_prog.STATE_FILE, _prog._state_loaded, _prog._state_mtime,
+         _prog._xp) = prog_bk
+    print("[selftest] gamification progress OK")
+
     print("[selftest] OK")
     del app
     return 0

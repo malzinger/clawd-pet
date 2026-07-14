@@ -212,3 +212,9 @@ CODEX_CONFIG_FILE = Path.home() / ".codex" / "config.toml"
 CODEX_RPC_TIMEOUT_S = 12.0     # budget for one app-server rate-limit read
 CODEX_POLL_INTERVAL_S = 300.0  # spawn the subprocess at most every 5 min
 CODEX_RETRY_S = 600.0          # after a failure wait even longer
+
+# --- W: window sitting ---
+# Shimeji-style perch on the frontmost window (opt-in, macOS via Quartz).
+WINDOW_SIT_POLL_MS = 500    # frontmost-window poll cadence while enabled
+WINDOW_SIT_MIN_W = 200      # ignore windows narrower than this (palettes etc.)
+WINDOW_SIT_MIN_H = 100      # ignore windows flatter than this (toolbars etc.)

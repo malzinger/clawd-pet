@@ -76,15 +76,15 @@ calibration), `api` (read-only live sync), `activity`/`hooks` (real time),
   notification when Claude needs your input. When idle he plays the occasional
   random flourish (juggling, sweeping, conducting …), and over-petting him
   makes him grumpy.
-- **Live sync (exact numbers):** Clawd shows the exact utilisation Claude's
-  own `/usage` popup does — refreshed every few seconds. For *permanent* live
-  numbers, set up **Clawd's own login** (tray menu): a one-time browser login
-  gives Clawd a separate OAuth grant (like a third device) stored in
-  `~/.clawd/auth.json`, which Clawd auto-refreshes itself — Claude Code's
-  credential store is never touched. Without it, Clawd falls back to reading
-  Claude Code's stored token READ-ONLY while it is valid, and after that to
-  the local estimate — calibrated from the last live reading, so it stays
-  close.
+- **Live sync (exact numbers):** Clawd shows the exact utilisation Claude's own
+  `/usage` popup does, refreshed every few seconds. Set up **Clawd's own login**
+  once (tray menu → "Set up Clawd login …") and Clawd keeps a separate,
+  auto-refreshing OAuth token in `~/.clawd/auth.json` for permanent live numbers —
+  a distinct grant (like a third device) that never touches Claude Code's own
+  login, so refreshing it can't lock you out of Claude Code. Without it, Clawd
+  falls back to reading Claude Code's token **read-only** (never refreshing or
+  writing that shared file), and to the calibrated local estimate when no token
+  is valid.
 - **Self-calibrating (fallback):** if the live sync is unavailable, right-click →
   "Limit kalibrieren …" and type the percentage from Claude's `/usage` popup; the
   app derives your real budget from it and stores it.

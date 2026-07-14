@@ -199,6 +199,9 @@ STRINGS = {
         "perm_deny": "✕ Ablehnen",
         "menu_dnd_on": "Nicht stören aktivieren",
         "menu_dnd_off": "Nicht stören deaktivieren",
+        # --- live-status line (usage accuracy fixes) ---
+        "src_uncalibrated": "lokal – unkalibriert, grobe Werte",
+        "src_rate_limited": "Live-Sync pausiert bis {t} (Rate-Limit)",
     },
     "en": {
         "panel_title": "Plan usage limits · {plan}",
@@ -328,6 +331,9 @@ STRINGS = {
         "perm_deny": "✕ Deny",
         "menu_dnd_on": "Enable do not disturb",
         "menu_dnd_off": "Disable do not disturb",
+        # --- live-status line (usage accuracy fixes) ---
+        "src_uncalibrated": "local – uncalibrated, rough numbers",
+        "src_rate_limited": "live sync paused until {t} (rate limited)",
     },
 }
 

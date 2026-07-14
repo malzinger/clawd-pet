@@ -23,6 +23,8 @@ from .config import (
     API_RETRY_S,
     API_STALE_S,
     CLAWD_AUTH_FILE,
+    RATE_LIMIT_BASE_S,
+    RATE_LIMIT_MAX_S,
     CREDENTIALS_FILE,
     OAUTH_CLIENT_ID,
     OAUTH_TOKEN_URL,
@@ -204,10 +206,46 @@ def force_live_refetch() -> None:
     _api_cache["next"] = 0.0
 
 
+# Why the last fetch failed — drives the back-off (429 gets a much longer,
+# Retry-After-aware pause than a network blip) and the panel's status line.
+_fetch_fail = {"kind": None, "retry_after": None}    # kind: no_token|429|http|net
+
+
+def _parse_retry_after(err: "urllib.error.HTTPError") -> Optional[float]:
+    """Seconds from a Retry-After header (delta or HTTP-date), clamped."""
+    raw = (err.headers.get("Retry-After") or "").strip() if err.headers else ""
+    if not raw:
+        return None
+    try:
+        secs = float(raw)
+    except ValueError:
+        try:
+            from email.utils import parsedate_to_datetime
+            secs = (parsedate_to_datetime(raw)
+                    - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError):
+            return None
+    return max(0.0, min(secs, RATE_LIMIT_MAX_S))
+
+
+def _failure_backoff(fails: int) -> float:
+    """Pause before the next usage poll after `fails` consecutive failures.
+
+    Being rate-limited means every retry is wasted AND prolongs the lockout,
+    so 429 backs off much harder (Retry-After when sent, else 5 min doubling
+    to 1 h) than an ordinary blip (5 s doubling to 2 min)."""
+    if _fetch_fail["kind"] == "429":
+        if _fetch_fail["retry_after"]:
+            return max(_fetch_fail["retry_after"], RATE_LIMIT_BASE_S)
+        return min(RATE_LIMIT_MAX_S, RATE_LIMIT_BASE_S * 2 ** min(fails - 1, 4))
+    return min(API_MAX_BACKOFF_S, API_RETRY_S * 2 ** (fails - 1))
+
+
 def fetch_api_usage() -> Optional[list]:
     """Real utilization buckets straight from Anthropic, or None on failure."""
     token = _get_access_token()
     if not token:
+        _fetch_fail.update(kind="no_token", retry_after=None)
         return None
     req = urllib.request.Request(USAGE_URL, headers={
         "Authorization": f"Bearer {token}",
@@ -217,8 +255,14 @@ def fetch_api_usage() -> Optional[list]:
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.load(resp)
-    except (urllib.error.URLError, OSError, ValueError):
+    except urllib.error.HTTPError as e:
+        _fetch_fail.update(kind="429" if e.code == 429 else "http",
+                           retry_after=_parse_retry_after(e))
         return None
+    except (urllib.error.URLError, OSError, ValueError):
+        _fetch_fail.update(kind="net", retry_after=None)
+        return None
+    _fetch_fail.update(kind=None, retry_after=None)
     if not isinstance(data, dict):
         return None
     buckets = []
@@ -298,8 +342,7 @@ def collect_usage(should_stop=None) -> UsageSnapshot:
                 fetched_ok = True
             else:
                 _api_cache["fails"] += 1
-                backoff = min(API_MAX_BACKOFF_S, API_RETRY_S * 2 ** (_api_cache["fails"] - 1))
-                _api_cache["next"] = now_s + backoff
+                _api_cache["next"] = now_s + _failure_backoff(_api_cache["fails"])
                 if _api_cache["buckets"] is not None and now_s - _api_cache["ts"] > API_STALE_S:
                     _api_cache["buckets"] = None       # last live reading too old — show the estimate
         buckets = _api_cache["buckets"]
@@ -336,8 +379,29 @@ def collect_usage(should_stop=None) -> UsageSnapshot:
                             model_budgets[name] = round(wtok / (b.pct / 100.0))
                 set_auto_calibration(budget_5h, anchor, weekly_budget,
                                      model_budgets or None)
+            snap.live_state, snap.live_until = "live", None
             return snap
-    return scan_usage(should_stop=should_stop)
+    snap = scan_usage(should_stop=should_stop)
+    snap.live_state, snap.live_until = live_status()
+    return snap
+
+
+def live_status():
+    """Why there are no live numbers right now: ('rate_limited', until) when
+    Anthropic sent a 429, ('no_token', None) without any login, ('error',
+    None) after other failures, ('live'/'off', None) otherwise."""
+    if not USE_API_USAGE:
+        return "off", None
+    if _api_cache["buckets"] is not None:
+        return "live", None
+    kind = _fetch_fail["kind"]
+    if kind == "429":
+        return "rate_limited", datetime.fromtimestamp(_api_cache["next"])
+    if kind == "no_token":
+        return "no_token", None
+    if kind in ("http", "net"):
+        return "error", None
+    return "off", None
 
 
 def _fmt_reset(resets_at: Optional[datetime]) -> str:

@@ -86,6 +86,7 @@ from .i18n import (
     tr,
 )
 from .moods import mood_for_pct
+from .notify import post_notification
 from .panel import PanelWidget
 from .pet import PetWidget
 from .update import UpdateThread, is_trusted_update_url, version_is_newer
@@ -681,7 +682,9 @@ class ClawdApp:
             return
         self._last_alert_mono = now
         self._last_toast_was_update = False
-        self.tray.showMessage(title, text, QSystemTrayIcon.Information, 7000)
+        # native first: Qt's fallback balloon steals focus on macOS
+        if not post_notification(title, text):
+            self.tray.showMessage(title, text, QSystemTrayIcon.Information, 7000)
         # F9: real chime when available; beep stays the offscreen/CI fallback
         if self.notify_sound and not sounds.play("attention"):
             QApplication.beep()
@@ -812,8 +815,10 @@ class ClawdApp:
         icon = (QSystemTrayIcon.Information if kind == "reset"
                 else QSystemTrayIcon.Warning)
         self._last_toast_was_update = False   # this balloon is not the update one
-        self.tray.showMessage(tr(f"notify_{kind}_title"),
-                              tr(f"notify_{kind}_text"), icon, 6000)
+        if not post_notification(tr(f"notify_{kind}_title"),
+                                 tr(f"notify_{kind}_text")):
+            self.tray.showMessage(tr(f"notify_{kind}_title"),
+                                  tr(f"notify_{kind}_text"), icon, 6000)
 
     def enable_hooks(self):
         command = hook_command()

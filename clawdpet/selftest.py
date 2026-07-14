@@ -1153,6 +1153,72 @@ def run_selftest() -> int:
     assert callable(hide_dock_icon)     # not invoked: offscreen has no Dock
     print("[selftest] hook runner + macdock OK")
 
+    # --- usage accuracy: 429 back-off + persisted auto-calibration --------
+    import email.message
+    import urllib.error as _ue
+    from . import api as _api, usage as _usage
+    from .config import API_RETRY_S, RATE_LIMIT_BASE_S, RATE_LIMIT_MAX_S
+    _fail_before = dict(_api._fetch_fail)
+    hdrs = email.message.Message()
+    hdrs["Retry-After"] = "900"
+    e429 = _ue.HTTPError("u", 429, "rl", hdrs, None)
+    assert _api._parse_retry_after(e429) == 900.0
+    e429b = _ue.HTTPError("u", 429, "rl", email.message.Message(), None)
+    assert _api._parse_retry_after(e429b) is None
+    _api._fetch_fail.update(kind="429", retry_after=900.0)
+    assert _api._failure_backoff(1) == 900.0
+    _api._fetch_fail.update(kind="429", retry_after=None)
+    assert _api._failure_backoff(1) == RATE_LIMIT_BASE_S
+    assert _api._failure_backoff(99) == RATE_LIMIT_MAX_S
+    _api._fetch_fail.update(kind="net", retry_after=None)
+    assert _api._failure_backoff(1) == API_RETRY_S       # ordinary blip stays quick
+    cache_before = dict(_api._api_cache)
+    _api._api_cache["buckets"] = None
+    _api._fetch_fail.update(kind="429", retry_after=None)
+    state, until = _api.live_status()
+    assert state == "rate_limited" and until is not None
+    _api._fetch_fail.update(kind="no_token", retry_after=None)
+    assert _api.live_status()[0] == "no_token"
+    _api._api_cache.update(cache_before)
+    _api._fetch_fail.update(_fail_before)
+
+    cal_backup = (_usage.CALIBRATION_FILE, _usage._calibration_loaded,
+                  _usage._AUTO_BUDGET_5H, _usage._WEEKLY_ANCHOR,
+                  _usage._WEEKLY_BUDGET_ALL, dict(_usage._WEEKLY_BUDGET_MODELS))
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            _usage.CALIBRATION_FILE = Path(td) / "calibration.json"
+            _usage._calibration_loaded = True     # skip loading the real file
+            _usage.reset_auto_calibration()
+            anchor = datetime(2026, 7, 19, 20, 59, tzinfo=timezone.utc)
+            _usage.set_auto_calibration(600_000, anchor, 42_000_000,
+                                        {"Fable": 20_000_000})
+            assert _usage.CALIBRATION_FILE.is_file(), "calibration not persisted"
+            # simulate a fresh process: wipe the globals, force a re-load
+            _usage._AUTO_BUDGET_5H = _usage._WEEKLY_ANCHOR = None
+            _usage._WEEKLY_BUDGET_ALL = None
+            _usage._WEEKLY_BUDGET_MODELS = {}
+            _usage._calibration_loaded = False
+            assert _usage.effective_max_tokens() == 600_000
+            assert _usage.weekly_budget_all() == 42_000_000
+            assert _usage.weekly_model_budgets() == {"Fable": 20_000_000}
+            assert _usage.auto_calibration()["anchor"] == anchor
+            _usage.reset_auto_calibration()
+            assert not _usage.CALIBRATION_FILE.exists()
+            assert _usage.effective_max_tokens() >= 1_000_000  # placeholder again
+    finally:
+        (_usage.CALIBRATION_FILE, _usage._calibration_loaded,
+         _usage._AUTO_BUDGET_5H, _usage._WEEKLY_ANCHOR,
+         _usage._WEEKLY_BUDGET_ALL, _usage._WEEKLY_BUDGET_MODELS) = cal_backup
+    print("[selftest] usage 429 backoff + calibration persistence OK")
+
+    # --- native notifications must not run in tests (focus-steal fix) -----
+    from .notify import _applescript_str, post_notification
+    os.environ["CLAWD_NO_NATIVE_NOTIFY"] = "1"
+    assert post_notification("t", "x") is False        # env kill-switch works
+    assert _applescript_str('a"b\\c') == '"a\\"b\\\\c"'
+    print("[selftest] native notify OK")
+
     print("[selftest] OK")
     del app
     return 0

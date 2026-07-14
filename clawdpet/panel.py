@@ -417,7 +417,16 @@ class PanelWidget(QWidget):
         self.history_chart.set_series(self._history)
         self.history_title.setVisible(len(self._history) >= 2)
         if snap.updated_at:
-            src = tr("src_live") if snap.source == "api" else tr("src_local")
+            if snap.source == "api":
+                src = tr("src_live")
+            elif is_calibrated() or auto_budget_active():
+                src = tr("src_local")
+            else:
+                src = tr("src_uncalibrated")   # placeholder budget — numbers are rough
+            if snap.live_state == "rate_limited":
+                until = (snap.live_until.strftime("%H:%M")
+                         if snap.live_until else "?")
+                src += " · " + tr("src_rate_limited", t=until)
             self.updated_label.setText(
                 tr("updated", t=snap.updated_at.strftime("%H:%M:%S"), src=src))
         self._refresh_countdown()

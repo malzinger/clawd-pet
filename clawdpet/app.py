@@ -107,7 +107,7 @@ from .update import UpdateThread, is_trusted_update_url, version_is_newer
 from .usage import (
     UsageSnapshot,
     _parse_iso_ts,
-    auto_calibration,
+    auto_budget_active,
     burn_eta,
     is_calibrated,
     notify_decision,
@@ -164,18 +164,27 @@ class ClawdApp:
         except (TypeError, ValueError):
             self.settings.remove("max_tokens")
 
-        # restore auto-calibration learned from previous live API syncs
-        try:
-            anchor_raw = self.settings.value("weekly_anchor", "") or ""
-            set_auto_calibration(
-                budget_5h=int(self.settings.value("auto_budget_5h", 0) or 0) or None,
-                weekly_anchor=_parse_iso_ts(anchor_raw) if anchor_raw else None,
-                weekly_budget=int(self.settings.value("weekly_budget_all", 0) or 0) or None,
-                weekly_model_budgets=json.loads(
-                    self.settings.value("weekly_budget_models", "") or "{}") or None,
-            )
-        except (TypeError, ValueError):
-            pass
+        # Auto-calibration lives in ~/.clawd/calibration.json ONLY (loaded
+        # lazily by clawdpet.usage). It used to be mirrored in QSettings too,
+        # and the startup restore-from-QSettings clobbered a fresher file
+        # with stale values after every pet restart — two persistence layers
+        # fighting each other. One-time migration: seed the file from any
+        # leftover QSettings values, then delete those keys for good.
+        if not auto_budget_active():
+            try:
+                anchor_raw = self.settings.value("weekly_anchor", "") or ""
+                set_auto_calibration(
+                    budget_5h=int(self.settings.value("auto_budget_5h", 0) or 0) or None,
+                    weekly_anchor=_parse_iso_ts(anchor_raw) if anchor_raw else None,
+                    weekly_budget=int(self.settings.value("weekly_budget_all", 0) or 0) or None,
+                    weekly_model_budgets=json.loads(
+                        self.settings.value("weekly_budget_models", "") or "{}") or None,
+                )
+            except (TypeError, ValueError):
+                pass
+        for _k in ("auto_budget_5h", "weekly_budget_all",
+                   "weekly_anchor", "weekly_budget_models"):
+            self.settings.remove(_k)
 
         self.pet = PetWidget(self)
         self.panel = PanelWidget()
@@ -536,15 +545,6 @@ class ClawdApp:
             self.panel.set_incident(sick)
             if sick and not self.dnd and not self.quiet and self.pet.isVisible():
                 self.bubble.show_text(tr("bubble_incident"), self.pet, 8000)
-        cal = auto_calibration()          # persist budgets learned from live syncs
-        if cal["budget_5h"]:
-            self.settings.setValue("auto_budget_5h", cal["budget_5h"])
-        if cal["weekly_budget"]:
-            self.settings.setValue("weekly_budget_all", cal["weekly_budget"])
-        if cal["anchor"] is not None:
-            self.settings.setValue("weekly_anchor", cal["anchor"].isoformat())
-        if cal["models"]:
-            self.settings.setValue("weekly_budget_models", json.dumps(cal["models"]))
         self.pet.set_snapshot(snap)
         self.panel.set_history(self.history.series())
         self.panel.update_snapshot(snap)

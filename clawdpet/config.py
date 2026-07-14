@@ -100,7 +100,11 @@ USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"   # Claude Code's public client id
 REFRESH_COOLDOWN_S = 300.0         # don't retry a failing own-token refresh more than every 5 min
-API_OK_INTERVAL_S = 60.0           # hit the usage endpoint at most this often when healthy
+# The usage endpoint rate-limits background pollers HARD (observed: repeated
+# one-hour lockouts at a 30-60 s cadence). Between live syncs the anchored,
+# auto-calibrated local estimate carries the display, so 15 min is plenty —
+# each sync re-anchors the windows and re-learns the budgets.
+API_OK_INTERVAL_S = 900.0          # hit the usage endpoint at most this often when healthy
 RATE_LIMIT_BASE_S = 300.0          # a 429 pauses live polling at least this long
 RATE_LIMIT_MAX_S = 3600.0          # cap for Retry-After and the 429 back-off
 API_RETRY_S = 5.0                  # base back-off after a failed usage fetch

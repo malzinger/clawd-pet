@@ -202,6 +202,17 @@ STRINGS = {
         # --- live-status line (usage accuracy fixes) ---
         "src_uncalibrated": "lokal – unkalibriert, grobe Werte",
         "src_rate_limited": "Live-Sync pausiert bis {t} (Rate-Limit)",
+        # --- X1: Codex integration ---
+        "row_codex_week": "Codex · Woche",
+        "row_codex_hours": "Codex · {h}h-Limit",
+        "codex_usage_line": "Codex ({plan}): {rows}",
+        "notify_codex_title": "Codex ist fertig",
+        "notify_codex_text": "Dein Turn – Codex wartet auf dich.",
+        "menu_codex_notify_on": "Codex-Meldungen aktivieren",
+        "menu_codex_notify_off": "Codex-Meldungen deaktivieren",
+        "codex_notify_foreign": "In ~/.codex/config.toml ist bereits ein "
+                                "eigener notify-Eintrag konfiguriert — bitte "
+                                "zuerst entfernen.",
         # --- X2: hook events + statusline ---
         "bubble_compact": "Ich räume den Kontext auf …",
         "menu_statusline_on": "Kontext-Anzeige aktivieren",
@@ -348,6 +359,16 @@ STRINGS = {
         # --- live-status line (usage accuracy fixes) ---
         "src_uncalibrated": "local – uncalibrated, rough numbers",
         "src_rate_limited": "live sync paused until {t} (rate limited)",
+        # --- X1: Codex integration ---
+        "row_codex_week": "Codex · week",
+        "row_codex_hours": "Codex · {h}h limit",
+        "codex_usage_line": "Codex ({plan}): {rows}",
+        "notify_codex_title": "Codex is done",
+        "notify_codex_text": "Your turn — Codex is waiting for you.",
+        "menu_codex_notify_on": "Enable Codex alerts",
+        "menu_codex_notify_off": "Disable Codex alerts",
+        "codex_notify_foreign": "~/.codex/config.toml already has its own "
+                                "notify entry — please remove it first.",
         # --- X2: hook events + statusline ---
         "bubble_compact": "Compacting context …",
         "menu_statusline_on": "Enable context display",

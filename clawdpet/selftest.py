@@ -1520,6 +1520,88 @@ def run_selftest() -> int:
         assert import_sprite_pack(Path(td) / "missing", dest_root=packs) is None
     print("[selftest] sprite-pack import OK")
 
+    # --- X1: Codex integration (rate-limit parsing, notify config, e2e) ---
+    from clawdpet.codex import (_parse_rate_limits, notify_command,
+                                notify_registered, register_notify,
+                                unregister_notify)
+    real_rpc = {"rateLimits": {
+        "limitId": "codex", "planType": "plus",
+        "primary": {"usedPercent": 51, "windowDurationMins": 10080,
+                    "resetsAt": 1784488399},
+        "secondary": {"usedPercent": 7, "windowDurationMins": 300,
+                      "resetsAt": 1784488399},
+    }}                                # shape captured from codex-cli 0.144.1
+    cb = _parse_rate_limits(real_rpc)
+    assert cb and len(cb) == 2
+    assert cb[0].key == "codex_primary" and cb[0].pct == 51.0
+    assert cb[0].resets_at is not None and "Codex" in cb[0].label
+    assert cb[1].pct == 7.0
+    assert _parse_rate_limits({}) is None
+    assert _parse_rate_limits({"rateLimits": {"primary": None}}) is None
+    with tempfile.TemporaryDirectory() as td:
+        cfg = Path(td) / "config.toml"
+        cfg.write_text('model = "gpt-5"\n', encoding="utf-8")
+        line = notify_command("/usr/bin/python3", Path(td) / "codex_notify.py")
+        assert register_notify(line, cfg) is True
+        assert notify_registered(cfg) is True
+        assert register_notify(line, cfg) is False        # idempotent
+        assert 'model = "gpt-5"' in cfg.read_text()
+        assert unregister_notify(cfg) is True
+        assert not notify_registered(cfg)
+        assert 'model = "gpt-5"' in cfg.read_text()
+        cfg.write_text('notify = ["mytool"]\n', encoding="utf-8")
+        assert register_notify(line, cfg) is False        # foreign -> refuse
+        assert not notify_registered(cfg)                 # ... and it is not ours
+        assert unregister_notify(cfg) is False            # never touch foreign
+        assert cfg.read_text() == 'notify = ["mytool"]\n'
+    # codex_turn routing: respects DND, alerts otherwise (no tray -> no raise)
+    capp.dnd = True
+    capp._handle_codex_turn({"turn_id": "t1"})
+    capp.dnd = False
+    was = capp._last_alert_mono
+    capp._last_alert_mono = 0.0
+    capp._handle_codex_turn({"turn_id": "t1", "message": "done"})
+    capp._last_alert_mono = was
+    print("[selftest] codex rate limits + notify config OK")
+
+    # codex_notify.py end-to-end against a probe socket
+    import socket as socket_mod
+    import subprocess as sp
+    probe = socket_mod.socket(socket_mod.AF_INET, socket_mod.SOCK_DGRAM)
+    probe.bind(("127.0.0.1", 0))
+    probe.settimeout(5.0)
+    with tempfile.TemporaryDirectory() as td:
+        tokf = Path(td) / "tok"
+        tokf.write_text("cafebabe" * 4, encoding="utf-8")
+        env = dict(os.environ,
+                   CLAWD_PET_PORT=str(probe.getsockname()[1]),
+                   CLAWD_TOKEN_FILE=str(tokf))
+        script = Path(__file__).resolve().parent.parent / "codex_notify.py"
+        evt = json.dumps({"type": "agent-turn-complete", "turn-id": "abc",
+                          "last-assistant-message": "done!"})
+        rc = sp.run([sys.executable, str(script), evt], env=env,
+                    timeout=15).returncode
+        assert rc == 0
+        data, _ = probe.recvfrom(65535)
+        tok, _, body = data.partition(b"\n")
+        assert tok.decode() == "cafebabe" * 4
+        payload = json.loads(body)
+        assert payload["codex_turn"]["turn_id"] == "abc"
+        # non-turn events send nothing and still exit 0
+        rc = sp.run([sys.executable, str(script),
+                     json.dumps({"type": "something-else"})],
+                    env=env, timeout=15).returncode
+        assert rc == 0
+    probe.close()
+    # panel line renders from codex buckets
+    snap_cdx = UsageSnapshot(updated_at=datetime.now())
+    snap_cdx.weighted = 1.0
+    snap_cdx.codex_buckets = cb
+    panel._update_extras(snap_cdx)
+    assert panel.codex_label.isVisibleTo(panel) or panel.codex_label.text()
+    assert "Codex" in panel.codex_label.text()
+    print("[selftest] codex notify e2e + panel line OK")
+
     print("[selftest] OK")
     del app
     return 0

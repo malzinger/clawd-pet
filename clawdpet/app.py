@@ -41,6 +41,14 @@ from .api import (
 from .art import make_app_icon
 from .autostart import autostart_enabled, autostart_supported, set_autostart
 from .bubble import SpeechBubble
+from .codex import (
+    codex_available,
+    codex_usage,
+    notify_command as codex_notify_command,
+    notify_registered as codex_notify_registered,
+    register_notify,
+    unregister_notify,
+)
 from .config import (
     ACTIVITY_POLL_MS,
     ALERT_COOLDOWN_S,
@@ -116,6 +124,12 @@ class ScanThread(QThread):
             snap = collect_usage(should_stop=self.isInterruptionRequested)
         except Exception as exc:  # never let the worker die silently
             snap = UsageSnapshot(error=tr("err_scan", e=exc), updated_at=datetime.now())
+        try:
+            # X1: Codex rate limits ride along — throttled internally, and the
+            # subprocess spawn may block, which is exactly why it happens here
+            snap.codex_buckets = codex_usage()
+        except Exception:
+            snap.codex_buckets = None
         self.result.emit(snap)
 # ======================================================================
 #  Application controller — wires pet, panel, tray and scanner together
@@ -374,6 +388,15 @@ class ClawdApp:
             act_sline.triggered.connect(self.enable_statusline)
         menu.addAction(act_sline)
 
+        if codex_available():
+            if codex_notify_registered():
+                act_cdx = QAction(tr("menu_codex_notify_off"), menu)
+                act_cdx.triggered.connect(self.disable_codex_notify)
+            else:
+                act_cdx = QAction(tr("menu_codex_notify_on"), menu)
+                act_cdx.triggered.connect(self.enable_codex_notify)
+            menu.addAction(act_cdx)
+
         act_cal = QAction(tr("menu_cal"), menu)
         act_cal.triggered.connect(self.calibrate)
         menu.addAction(act_cal)
@@ -601,10 +624,13 @@ class ClawdApp:
                 continue
             query = event.get("clawd_permission")
             status = event.get("clawd_statusline")
+            codex_turn = event.get("codex_turn")
             if isinstance(query, dict):
                 self._handle_permission_query(query, host, port)
             elif isinstance(status, dict):
                 self._handle_statusline(status)
+            elif isinstance(codex_turn, dict):
+                self._handle_codex_turn(codex_turn)
             else:
                 self._handle_hook_event(event)
 
@@ -958,6 +984,35 @@ class ClawdApp:
         model = model.strip() if isinstance(model, str) and model.strip() else None
         self._context_pct = pct
         self.panel.set_context(pct, model)
+
+    # -------------------------------------------------- Codex (X1)
+
+    def _handle_codex_turn(self, payload: dict):
+        """codex_notify.py forwarded an agent-turn-complete event: same
+        'your turn' treatment as a finished Claude turn, Codex-labeled."""
+        if self.dnd or not self.notify_enabled:
+            return
+        self._fire_alert(tr("notify_codex_title"), tr("notify_codex_text"))
+        if self.pet.isVisible() and not self.quiet:
+            self.bubble.show_text(tr("notify_codex_text"), self.pet,
+                                  on_click=focus_terminal)
+
+    def enable_codex_notify(self):
+        from .hooks import _hook_runner
+        runner = _hook_runner()
+        script = Path(__file__).resolve().parent.parent / "codex_notify.py"
+        if not runner or not script.is_file():
+            return
+        line = codex_notify_command(runner, script)
+        if not register_notify(line):
+            if not codex_notify_registered():   # a foreign entry blocked us
+                QMessageBox.information(None, "Codex",
+                                        tr("codex_notify_foreign"))
+        self._rebuild_tray_menu()
+
+    def disable_codex_notify(self):
+        unregister_notify()
+        self._rebuild_tray_menu()
 
     # -------------------------------------------------- calibration
 

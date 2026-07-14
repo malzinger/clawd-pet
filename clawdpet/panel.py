@@ -186,6 +186,10 @@ class PanelWidget(QWidget):
         self.projects_label.setObjectName("sub")
         self.projects_label.setWordWrap(True)
         lay.addWidget(self.projects_label)
+        self.codex_label = QLabel("")     # X1: Codex rate limits, when known
+        self.codex_label.setObjectName("sub")
+        self.codex_label.setWordWrap(True)
+        lay.addWidget(self.codex_label)
         self.forecast_label = QLabel("")
         self.forecast_label.setObjectName("sub")
         self.forecast_label.setWordWrap(True)
@@ -511,6 +515,15 @@ class PanelWidget(QWidget):
         self.projects_label.setText(
             tr("projects_line", parts=parts) if parts else "")
         self.projects_label.setVisible(bool(self.projects_label.text()))
+
+        rows = ""
+        for b in (snap.codex_buckets or []):
+            reset = _fmt_reset(b.resets_at)
+            rows += (" · " if rows else "") + (
+                f"{b.label} {fmt_pct_de(b.pct)}"
+                + (f" ({reset})" if reset else ""))
+        self.codex_label.setText(rows)
+        self.codex_label.setVisible(bool(rows))
 
     def _update_forecast(self, snap: UsageSnapshot):
         """Burn-rate line: projected time of hitting the 5-hour limit."""

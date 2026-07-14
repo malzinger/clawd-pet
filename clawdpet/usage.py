@@ -58,6 +58,7 @@ class UsageSnapshot:
     by_project_weighted: dict = field(default_factory=dict)
     live_state: str = ""                          # why live is (un)available, see api.live_status
     live_until: Optional[datetime] = None         # rate-limit pause end, if known
+    codex_buckets: Optional[list] = None          # Codex rate limits (X1), or None
 
 
 _MAX_TOKENS_OVERRIDE: Optional[int] = None      # set once manually calibrated

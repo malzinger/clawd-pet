@@ -202,3 +202,9 @@ TYPING_BOB_PX = 2
 CELEBRATE_MS = 3000         # length of the one-shot celebration
 CELEBRATE_HOP_V = 260.0     # upward hop speed (reuses the throw physics)
 
+
+# --- X1: Codex CLI integration (rate limits via app-server, notify hook) -----
+CODEX_CONFIG_FILE = Path.home() / ".codex" / "config.toml"
+CODEX_RPC_TIMEOUT_S = 12.0     # budget for one app-server rate-limit read
+CODEX_POLL_INTERVAL_S = 300.0  # spawn the subprocess at most every 5 min
+CODEX_RETRY_S = 600.0          # after a failure wait even longer

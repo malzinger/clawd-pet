@@ -107,7 +107,10 @@ class PermissionBubble(QWidget):
         self.adjustSize()
         self._follow(pet)
         self.show()
-        self.raise_()
+        if sys.platform != "darwin":
+            # raise_() can activate the whole app on macOS (focus steal);
+            # WindowStaysOnTopHint already keeps the callout above everything
+            self.raise_()
         self._timeout.start(int(DECIDE_S * 1000))
 
     def _follow(self, pet: QWidget) -> None:

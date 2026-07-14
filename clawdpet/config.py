@@ -100,10 +100,16 @@ USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"   # Claude Code's public client id
 REFRESH_COOLDOWN_S = 300.0         # don't retry a failing own-token refresh more than every 5 min
-API_OK_INTERVAL_S = 30.0           # hit the usage endpoint at most this often when healthy
+# The usage endpoint rate-limits background pollers HARD (observed: repeated
+# one-hour lockouts at a 30-60 s cadence). Between live syncs the anchored,
+# auto-calibrated local estimate carries the display, so 15 min is plenty —
+# each sync re-anchors the windows and re-learns the budgets.
+API_OK_INTERVAL_S = 900.0          # hit the usage endpoint at most this often when healthy
+RATE_LIMIT_BASE_S = 300.0          # a 429 pauses live polling at least this long
+RATE_LIMIT_MAX_S = 3600.0          # cap for Retry-After and the 429 back-off
 API_RETRY_S = 5.0                  # base back-off after a failed usage fetch
 API_MAX_BACKOFF_S = 120.0          # cap the exponential back-off on repeated failures
-API_STALE_S = 180.0                # keep showing the last live % up to this long, then estimate
+API_STALE_S = 180.0                # legacy (pre-projection); kept for external scripts
 
 ORG_NAME = "ClawdPet"
 APP_NAME = "Clawd"
@@ -173,3 +179,36 @@ THROW_STOP_SPEED = 60.0    # px/s below which a grounded throw comes to rest
 # factor applied to PET_HEIGHT (the sprites rescale, the panel/tray art not).
 PET_SIZE_FACTORS = {"S": 0.7, "M": 1.0, "L": 1.4}
 
+# --- X2: hook events + statusline ---
+# Newer Claude Code hook events the activity hook also registers for.
+# Events arriving from an old clawd_hook.py copy (or unknown ones) are
+# ignored gracefully by the receiver, so this list can only grow.
+HOOK_EVENTS += [
+    "SubagentStart", "SubagentStop",     # Clawd juggles running subagents
+    "PostToolUseFailure", "StopFailure",  # a failure startles the pet
+    "PreCompact", "PostCompact",          # sweeping up while compacting
+    "SessionEnd",                         # clears hook-driven activity state
+]
+# Context-window fill from the Claude Code statusline (clawd_statusline.py):
+# the panel hides its context row when no update arrived for this long.
+CONTEXT_STALE_S = 120
+
+# --- Y: pet behaviors (idle throttle, cursor chase, typing bob, celebrate) ---
+THROTTLE_IDLE_S = 60.0      # fully idle this long -> slow the animation timer
+THROTTLE_TICK_MS = 250      # throttled frame interval (vs. ANIM_TICK_MS 33)
+CHASE_TICK_MS = 50          # cursor-chase state machine tick
+CHASE_SPEED_PX = 3.2        # px per tick while chasing (a bit faster than wander)
+CHASE_WAIT_RANGE_S = (30.0, 90.0)   # pause between chase attempts
+CHASE_STOP_SHORT_PX = 30    # never park ON the cursor — stop this short of it
+CHASE_RELEASE_PX = 120      # cursor moved this far -> wake up and let go
+TYPING_BOB_PERIOD_MS = 125  # ~8 Hz typing-along bob while Claude generates
+TYPING_BOB_PX = 2
+CELEBRATE_MS = 3000         # length of the one-shot celebration
+CELEBRATE_HOP_V = 260.0     # upward hop speed (reuses the throw physics)
+
+
+# --- X1: Codex CLI integration (rate limits via app-server, notify hook) -----
+CODEX_CONFIG_FILE = Path.home() / ".codex" / "config.toml"
+CODEX_RPC_TIMEOUT_S = 12.0     # budget for one app-server rate-limit read
+CODEX_POLL_INTERVAL_S = 300.0  # spawn the subprocess at most every 5 min
+CODEX_RETRY_S = 600.0          # after a failure wait even longer

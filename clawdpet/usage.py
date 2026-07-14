@@ -56,6 +56,11 @@ class UsageSnapshot:
     burn_eta: Optional[datetime] = None           # projected time of hitting 100 %
     by_project: dict = field(default_factory=dict)  # project name -> in+out (5h window)
     by_project_weighted: dict = field(default_factory=dict)
+    live_state: str = ""                          # why live is (un)available, see api.live_status
+    live_until: Optional[datetime] = None         # rate-limit pause end, if known
+    live_fetched_at: Optional[datetime] = None    # when the shown live buckets were fetched
+    codex_buckets: Optional[list] = None          # Codex rate limits (X1), or None
+    anthropic_sick: bool = False                  # status.anthropic.com incident
 
 
 _MAX_TOKENS_OVERRIDE: Optional[int] = None      # set once manually calibrated
@@ -67,16 +72,104 @@ _AUTO_BUDGET_5H: Optional[int] = None
 _WEEKLY_ANCHOR: Optional[datetime] = None       # one known weekly reset boundary
 _WEEKLY_BUDGET_ALL: Optional[int] = None
 _WEEKLY_BUDGET_MODELS: dict = {}
+_SESSION_ANCHOR: Optional[datetime] = None      # one known 5h reset boundary (live)
+
+
+# The learned budgets used to live only in module globals, so every pet
+# restart silently fell back to the MAX_TOKENS placeholder until the next
+# successful live fetch — with the live sync down (expired token, rate limit)
+# the estimate was off by orders of magnitude. Persisted best-effort instead.
+CALIBRATION_FILE = Path.home() / ".clawd" / "calibration.json"
+_calibration_loaded = False
+_calibration_mtime = None
+
+
+def _load_calibration() -> None:
+    """Load (or re-load) the calibration file.
+
+    mtime-aware: several processes share this file (the pet, probes, a
+    second instance), and a process that cached its state once used to keep
+    stale budgets forever. Now any external write is picked up on the next
+    access — i.e. within one 2 s scan cycle."""
+    global _calibration_loaded, _AUTO_BUDGET_5H, _WEEKLY_ANCHOR
+    global _WEEKLY_BUDGET_ALL, _WEEKLY_BUDGET_MODELS, _SESSION_ANCHOR
+    global _calibration_mtime
+    try:
+        mtime = CALIBRATION_FILE.stat().st_mtime_ns
+    except OSError:
+        mtime = None
+    if _calibration_loaded and mtime == _calibration_mtime:
+        return
+    _calibration_loaded = True
+    _calibration_mtime = mtime
+    try:
+        data = json.loads(CALIBRATION_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    if isinstance(data.get("budget_5h"), int) and data["budget_5h"] > 0:
+        _AUTO_BUDGET_5H = data["budget_5h"]
+    if isinstance(data.get("weekly_budget"), int) and data["weekly_budget"] > 0:
+        _WEEKLY_BUDGET_ALL = data["weekly_budget"]
+    if isinstance(data.get("models"), dict):
+        _WEEKLY_BUDGET_MODELS = {str(k): int(v)
+                                 for k, v in data["models"].items()
+                                 if isinstance(v, (int, float)) and v > 0}
+    try:
+        anchor = datetime.fromisoformat(data.get("anchor") or "")
+        _WEEKLY_ANCHOR = anchor if anchor.tzinfo else None
+    except (TypeError, ValueError):
+        pass
+    try:
+        sess = datetime.fromisoformat(data.get("session_reset") or "")
+        _SESSION_ANCHOR = sess if sess.tzinfo else None
+    except (TypeError, ValueError):
+        pass
+
+
+def _reload_calibration() -> None:
+    """Re-sync the module state from the file before writing.
+
+    Several processes can run this code (the pet, probes, an old instance):
+    without re-reading, a writer with stale in-memory values would clobber a
+    fresher file and resurrect wrong budgets — observed live twice."""
+    global _calibration_loaded
+    _calibration_loaded = False
+    _load_calibration()
+
+
+def _save_calibration() -> None:
+    data = {"budget_5h": _AUTO_BUDGET_5H,
+            "weekly_budget": _WEEKLY_BUDGET_ALL,
+            "models": _WEEKLY_BUDGET_MODELS,
+            "anchor": _WEEKLY_ANCHOR.isoformat() if _WEEKLY_ANCHOR else None,
+            "session_reset": (_SESSION_ANCHOR.isoformat()
+                              if _SESSION_ANCHOR else None)}
+    try:
+        CALIBRATION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = CALIBRATION_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.replace(CALIBRATION_FILE)
+    except OSError:
+        pass                        # unwritable home — in-memory values still work
 
 
 def effective_max_tokens() -> int:
     """Manual calibration wins, then auto-calibration, then the placeholder."""
+    _load_calibration()
     return _MAX_TOKENS_OVERRIDE or _AUTO_BUDGET_5H or MAX_TOKENS
 
 
 def set_auto_calibration(budget_5h=None, weekly_anchor=None,
-                         weekly_budget=None, weekly_model_budgets=None) -> None:
-    global _AUTO_BUDGET_5H, _WEEKLY_ANCHOR, _WEEKLY_BUDGET_ALL, _WEEKLY_BUDGET_MODELS
+                         weekly_budget=None, weekly_model_budgets=None,
+                         session_reset=None) -> None:
+    global _AUTO_BUDGET_5H, _WEEKLY_ANCHOR, _WEEKLY_BUDGET_ALL
+    global _WEEKLY_BUDGET_MODELS, _SESSION_ANCHOR
+    _reload_calibration()      # never write on top of a stale in-memory state
+    before = auto_calibration()
+    if session_reset is not None:
+        _SESSION_ANCHOR = session_reset
     if budget_5h:
         _AUTO_BUDGET_5H = int(budget_5h)
     if weekly_anchor is not None:
@@ -86,31 +179,46 @@ def set_auto_calibration(budget_5h=None, weekly_anchor=None,
     if weekly_model_budgets:
         _WEEKLY_BUDGET_MODELS = {str(k): int(v)
                                  for k, v in weekly_model_budgets.items()}
+    if auto_calibration() != before:
+        _save_calibration()
 
 
 def reset_auto_calibration() -> None:
-    global _AUTO_BUDGET_5H, _WEEKLY_ANCHOR, _WEEKLY_BUDGET_ALL, _WEEKLY_BUDGET_MODELS
+    global _AUTO_BUDGET_5H, _WEEKLY_ANCHOR, _WEEKLY_BUDGET_ALL
+    global _WEEKLY_BUDGET_MODELS, _SESSION_ANCHOR
     _AUTO_BUDGET_5H = None
     _WEEKLY_ANCHOR = None
     _WEEKLY_BUDGET_ALL = None
     _WEEKLY_BUDGET_MODELS = {}
+    _SESSION_ANCHOR = None
+    global _calibration_mtime
+    try:
+        CALIBRATION_FILE.unlink()
+    except OSError:
+        pass
+    _calibration_mtime = None
 
 
 def auto_calibration() -> dict:
+    _load_calibration()
     return {"budget_5h": _AUTO_BUDGET_5H, "anchor": _WEEKLY_ANCHOR,
             "weekly_budget": _WEEKLY_BUDGET_ALL,
-            "models": dict(_WEEKLY_BUDGET_MODELS)}
+            "models": dict(_WEEKLY_BUDGET_MODELS),
+            "session_reset": _SESSION_ANCHOR}
 
 
 def auto_budget_active() -> bool:
+    _load_calibration()
     return _AUTO_BUDGET_5H is not None
 
 
 def weekly_budget_all() -> Optional[int]:
+    _load_calibration()
     return _WEEKLY_BUDGET_ALL
 
 
 def weekly_model_budgets() -> dict:
+    _load_calibration()
     return dict(_WEEKLY_BUDGET_MODELS)
 
 
@@ -119,6 +227,7 @@ def _weekly_window(now: datetime):
 
     Anchored at a reset boundary learned from the live API; without one we
     fall back to a rolling 7 days (reset unknown)."""
+    _load_calibration()
     week = timedelta(days=7)
     if _WEEKLY_ANCHOR is not None:
         reset = _WEEKLY_ANCHOR + week * math.ceil((now - _WEEKLY_ANCHOR) / week)
@@ -259,6 +368,25 @@ def _current_window_start(timestamps, now: datetime) -> Optional[datetime]:
     if not timestamps:
         return None
     window = timedelta(hours=WINDOW_HOURS)
+    _load_calibration()
+    reset = _SESSION_ANCHOR
+    if reset is not None and now < reset <= now + window:
+        # the live API told us exactly when the current window ends —
+        # that boundary beats any replay heuristic
+        return reset - window
+    if reset is not None and now >= reset and reset >= timestamps[0]:
+        # the known boundary has passed: chain forward from it — the first
+        # message at/after a reset opens the next window
+        idx = bisect.bisect_left(timestamps, reset)
+        if idx >= len(timestamps):
+            return None
+        start = timestamps[idx]
+        while now >= start + window:
+            idx = bisect.bisect_left(timestamps, start + window)
+            if idx >= len(timestamps):
+                return None
+            start = timestamps[idx]
+        return start
     anchor = timestamps[0]
     prev = timestamps[0]
     for ts in timestamps[1:]:

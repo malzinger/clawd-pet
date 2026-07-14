@@ -26,6 +26,7 @@ from PyQt5.QtWidgets import (
 from .api import _fmt_reset
 from .art import make_clawd_pixmap, sprite_pixmap
 from .config import (
+    CONTEXT_STALE_S,
     PANEL_WIDTH,
     PLAN_NAME,
     SONNET_INPUT_USD_PER_MTOK,
@@ -165,6 +166,11 @@ class PanelWidget(QWidget):
         # ---- usage rows, created on demand from the live buckets --------
         self._rows = {}
 
+        # ---- context-window fill (X2, fed by app via set_context) -------
+        self._ctx_pct: Optional[float] = None
+        self._ctx_model: Optional[str] = None
+        self._ctx_ts: Optional[float] = None    # monotonic stamp of last update
+
         # ---- footer ------------------------------------------------------
         self._footer_div = self._divider()
         lay.addWidget(self._footer_div)
@@ -180,6 +186,16 @@ class PanelWidget(QWidget):
         self.projects_label.setObjectName("sub")
         self.projects_label.setWordWrap(True)
         lay.addWidget(self.projects_label)
+        self.codex_label = QLabel("")     # X1: Codex rate limits, when known
+        self.codex_label.setObjectName("sub")
+        self.codex_label.setWordWrap(True)
+        lay.addWidget(self.codex_label)
+        self.incident_label = QLabel("")  # Anthropic status-page incident
+        self.incident_label.setObjectName("sub")
+        self.incident_label.setStyleSheet("color: #e8a54e;")
+        self.incident_label.setWordWrap(True)
+        self.incident_label.setVisible(False)
+        lay.addWidget(self.incident_label)
         self.forecast_label = QLabel("")
         self.forecast_label.setObjectName("sub")
         self.forecast_label.setWordWrap(True)
@@ -260,12 +276,57 @@ class PanelWidget(QWidget):
         self._title.setText(tr("panel_title", plan=PLAN_NAME))
         self.history_title.setText(tr("history_title"))
         self.task_title.setText(tr("task_title"))
+        if "context" in self._rows:      # X2: row label follows the language
+            self._rows["context"]["name"].setText(tr("row_context"))
         if self._snap is not None:    # re-render the cost/project lines in the
             self._update_extras(self._snap)   # new language right away
         self.set_task(self._task_ctx, self._work_since)
 
     def set_history(self, series):
         self._history = list(series)
+
+    # ------------------------------------- context-window fill (X2)
+
+    def set_context(self, pct, model=None):
+        """Latest context-window fill (0-100) from the statusline, or None.
+
+        Called by ClawdApp when a clawd_statusline datagram arrives — the
+        panel itself never touches sockets. A value older than
+        CONTEXT_STALE_S is treated as unknown and the row hides again.
+        """
+        if pct is None:
+            self._ctx_pct = None
+            self._ctx_model = None
+            self._ctx_ts = None
+        else:
+            self._ctx_pct = max(0.0, min(100.0, float(pct)))
+            self._ctx_model = model or None
+            self._ctx_ts = time.monotonic()
+        self._update_context_row()
+        self._relayout()
+
+    def _context_fresh(self) -> bool:
+        return (self._ctx_pct is not None and self._ctx_ts is not None
+                and time.monotonic() - self._ctx_ts < CONTEXT_STALE_S)
+
+    def _context_row_shown(self) -> bool:
+        row = self._rows.get("context")
+        return row is not None and not row["name"].isHidden()
+
+    def _update_context_row(self):
+        """Show/refresh the slim context row, or hide it when unknown/stale."""
+        if not self._context_fresh():
+            row = self._rows.get("context")
+            if row is not None:
+                for part in ("name", "reset", "pct", "bar"):
+                    row[part].setVisible(False)
+            return
+        row = self._ensure_row("context", tr("row_context"))
+        self._animate_row(row, self._ctx_pct)
+        row["reset"].setText(self._ctx_model or "")
+        for part in ("name", "pct", "bar"):
+            row[part].setVisible(True)
+        row["reset"].setVisible(bool(self._ctx_model))   # ONE compact row
 
     def set_task(self, ctx, work_since=None):
         """Update the 'what Clawd is working on' section from a SessionContext.
@@ -324,6 +385,8 @@ class PanelWidget(QWidget):
         """Hide rows that the current snapshot does not provide, so switching
         between API and log mode never leaves a stale duplicate row behind."""
         for key, row in self._rows.items():
+            if key == "context":
+                continue        # X2: managed by _update_context_row, not snapshots
             visible = key in keys
             for part in ("name", "reset", "pct", "bar"):
                 row[part].setVisible(visible)
@@ -417,10 +480,31 @@ class PanelWidget(QWidget):
         self.history_chart.set_series(self._history)
         self.history_title.setVisible(len(self._history) >= 2)
         if snap.updated_at:
-            src = tr("src_live") if snap.source == "api" else tr("src_local")
+            if snap.source == "api":
+                src = tr("src_live")
+                fetched = snap.live_fetched_at
+                if (fetched is not None
+                        and (snap.updated_at - fetched).total_seconds() > 120):
+                    # between polls: live values + locally projected delta
+                    src = tr("src_live_proj", t=fetched.strftime("%H:%M"))
+            elif is_calibrated() or auto_budget_active():
+                src = tr("src_local")
+            else:
+                src = tr("src_uncalibrated")   # placeholder budget — numbers are rough
+            if snap.live_state == "rate_limited":
+                until = (snap.live_until.strftime("%H:%M")
+                         if snap.live_until else "?")
+                src += " · " + tr("src_rate_limited", t=until)
             self.updated_label.setText(
                 tr("updated", t=snap.updated_at.strftime("%H:%M:%S"), src=src))
+        self._update_context_row()      # X2: survives _show_only, hides when stale
         self._refresh_countdown()
+        self._relayout()
+
+    def set_incident(self, sick: bool):
+        """Anthropic reports a major incident — the numbers may lag/err."""
+        self.incident_label.setText(tr("incident_line") if sick else "")
+        self.incident_label.setVisible(bool(sick))
         self._relayout()
 
     def _update_extras(self, snap: UsageSnapshot):
@@ -449,6 +533,15 @@ class PanelWidget(QWidget):
             tr("projects_line", parts=parts) if parts else "")
         self.projects_label.setVisible(bool(self.projects_label.text()))
 
+        rows = ""
+        for b in (snap.codex_buckets or []):
+            reset = _fmt_reset(b.resets_at)
+            rows += (" · " if rows else "") + (
+                f"{b.label} {fmt_pct_de(b.pct)}"
+                + (f" ({reset})" if reset else ""))
+        self.codex_label.setText(rows)
+        self.codex_label.setVisible(bool(rows))
+
     def _update_forecast(self, snap: UsageSnapshot):
         """Burn-rate line: projected time of hitting the 5-hour limit."""
         reset_at = None
@@ -470,6 +563,10 @@ class PanelWidget(QWidget):
 
     def _refresh_countdown(self):
         self._render_task_activity()     # tick the turn timer while visible
+        # X2: a context value that stopped updating goes stale -> hide the row
+        if self._context_row_shown() and not self._context_fresh():
+            self._update_context_row()
+            self._relayout()
         snap = self._snap
         if snap is None:
             return

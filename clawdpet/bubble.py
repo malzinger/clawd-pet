@@ -40,7 +40,10 @@ class SpeechBubble(QWidget):
                           fm.height() + self.PAD_Y * 2 + self.TAIL_H)
         self.follow(pet)
         self.show()
-        self.raise_()
+        if sys.platform != "darwin":
+            # raise_() can activate the whole app on macOS (focus steal);
+            # WindowStaysOnTopHint already keeps the callout above everything
+            self.raise_()
         self.update()
         self._hide_timer.start(duration_ms)
 

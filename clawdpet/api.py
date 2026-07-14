@@ -8,12 +8,14 @@ import hashlib
 import json
 import os
 import secrets
+import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -21,17 +23,20 @@ from .config import (
     API_MAX_BACKOFF_S,
     API_OK_INTERVAL_S,
     API_RETRY_S,
-    API_STALE_S,
     CLAWD_AUTH_FILE,
+    RATE_LIMIT_BASE_S,
+    RATE_LIMIT_MAX_S,
     CREDENTIALS_FILE,
     OAUTH_CLIENT_ID,
     OAUTH_TOKEN_URL,
     REFRESH_COOLDOWN_S,
     USAGE_URL,
     USE_API_USAGE,
+    WINDOW_HOURS,
 )
 from .i18n import tr
-from .usage import UsageSnapshot, _parse_iso_ts, scan_usage, set_auto_calibration
+from .usage import (UsageSnapshot, _parse_iso_ts, auto_calibration,
+                    scan_usage, set_auto_calibration)
 
 # ======================================================================
 #  Live usage via the Anthropic OAuth API — the same numbers the Claude
@@ -132,25 +137,45 @@ def _clawd_own_token(path: Path = CLAWD_AUTH_FILE) -> Optional[str]:
     return _refresh_clawd_token(auth, path)   # expired — safe self-refresh of our own token
 
 
-def _get_access_token() -> Optional[str]:
-    """Prefer Clawd's own independent token (auto-refreshed); otherwise fall back
-    to the token Claude Code stored, READ-ONLY (never refreshed or written, so a
-    rotation we could not persist can never lock the user out of Claude Code)."""
-    if os.environ.get("CLAWD_NO_API"):
-        return None
-    own = _clawd_own_token()
-    if own:
-        return own
+def _claude_code_token() -> Optional[str]:
+    """The token Claude Code itself stored, strictly READ-ONLY.
+
+    Never refreshed and never written back — a failed write-back of Claude
+    Code's rotating login could lock the user out of Claude Code. On
+    Windows/Linux it lives in ~/.claude/.credentials.json; on macOS Claude
+    Code keeps it in the login keychain instead, read via `security`."""
+    creds = None
     try:
         creds = json.loads(CREDENTIALS_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        pass
+    if creds is None and sys.platform == "darwin":
+        try:
+            proc = subprocess.run(
+                ["security", "find-generic-password",
+                 "-s", "Claude Code-credentials", "-w"],
+                capture_output=True, text=True, timeout=10)
+            if proc.returncode == 0:
+                creds = json.loads(proc.stdout)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            creds = None
+    if not isinstance(creds, dict):
         return None
     oauth = creds.get("claudeAiOauth") or {}
     token = oauth.get("accessToken")
     expires_ms = oauth.get("expiresAt") or 0
     if token and time.time() * 1000 < expires_ms - 60_000:
         return token
-    return None                   # both expired — fall back to the log estimate
+    return None
+
+
+def _get_access_token() -> Optional[str]:
+    """Prefer Clawd's own independent token (auto-refreshed); otherwise fall back
+    to the token Claude Code stored, READ-ONLY (never refreshed or written, so a
+    rotation we could not persist can never lock the user out of Claude Code)."""
+    if os.environ.get("CLAWD_NO_API"):
+        return None
+    return _clawd_own_token() or _claude_code_token()
 
 
 def clawd_build_authorize_url():
@@ -204,11 +229,46 @@ def force_live_refetch() -> None:
     _api_cache["next"] = 0.0
 
 
-def fetch_api_usage() -> Optional[list]:
-    """Real utilization buckets straight from Anthropic, or None on failure."""
-    token = _get_access_token()
-    if not token:
+# Why the last fetch failed — drives the back-off (429 gets a much longer,
+# Retry-After-aware pause than a network blip) and the panel's status line.
+_fetch_fail = {"kind": None, "retry_after": None}    # kind: no_token|429|http|net
+
+
+def _parse_retry_after(err: "urllib.error.HTTPError") -> Optional[float]:
+    """Seconds from a Retry-After header (delta or HTTP-date), clamped."""
+    raw = (err.headers.get("Retry-After") or "").strip() if err.headers else ""
+    if not raw:
         return None
+    try:
+        secs = float(raw)
+    except ValueError:
+        try:
+            from email.utils import parsedate_to_datetime
+            secs = (parsedate_to_datetime(raw)
+                    - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError):
+            return None
+    return max(0.0, min(secs, RATE_LIMIT_MAX_S))
+
+
+def _failure_backoff(fails: int) -> float:
+    """Pause before the next usage poll after `fails` consecutive failures.
+
+    Being rate-limited means every retry is wasted AND prolongs the lockout,
+    so 429 backs off much harder (Retry-After when sent, else 5 min doubling
+    to 1 h) than an ordinary blip (5 s doubling to 2 min)."""
+    if _fetch_fail["kind"] == "429":
+        if _fetch_fail["retry_after"]:
+            return max(_fetch_fail["retry_after"], RATE_LIMIT_BASE_S)
+        return min(RATE_LIMIT_MAX_S, RATE_LIMIT_BASE_S * 2 ** min(fails - 1, 4))
+    return min(API_MAX_BACKOFF_S, API_RETRY_S * 2 ** (fails - 1))
+
+
+_source_pause = {}     # token source name -> time.time() until it rests (429)
+
+
+def _fetch_usage_with(token: str):
+    """One usage request. Returns (data, err_kind, retry_after_s)."""
     req = urllib.request.Request(USAGE_URL, headers={
         "Authorization": f"Bearer {token}",
         "anthropic-beta": "oauth-2025-04-20",
@@ -217,10 +277,56 @@ def fetch_api_usage() -> Optional[list]:
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.load(resp)
+    except urllib.error.HTTPError as e:
+        return None, ("429" if e.code == 429 else "http"), _parse_retry_after(e)
     except (urllib.error.URLError, OSError, ValueError):
+        return None, "net", None
+    return (data if isinstance(data, dict) else None), None, None
+
+
+def fetch_api_usage() -> Optional[list]:
+    """Real utilization buckets straight from Anthropic, or None on failure.
+
+    The endpoint rate-limits PER TOKEN (verified live: Clawd's own token was
+    locked out for an hour while Claude Code's token answered fine), so both
+    tokens are candidates: Clawd's own grant first, then Claude Code's token
+    read-only. A 429 pauses only that token; the other one carries on.
+    """
+    if os.environ.get("CLAWD_NO_API"):
+        _fetch_fail.update(kind="no_token", retry_after=None)
         return None
-    if not isinstance(data, dict):
+    candidates = []
+    own = _clawd_own_token()
+    if own:
+        candidates.append(("own", own))
+    cc = _claude_code_token()
+    if cc and cc != own:
+        candidates.append(("claude-code", cc))
+    if not candidates:
+        _fetch_fail.update(kind="no_token", retry_after=None)
         return None
+    now = time.time()
+    last_kind, last_ra = None, None
+    for source, token in candidates:
+        if now < _source_pause.get(source, 0.0):
+            if last_kind is None:      # every skipped source counts as limited
+                last_kind = "429"
+                last_ra = _source_pause[source] - now
+            continue
+        data, kind, ra = _fetch_usage_with(token)
+        if data is not None:
+            _fetch_fail.update(kind=None, retry_after=None)
+            return _parse_usage_buckets(data)
+        last_kind, last_ra = kind, ra
+        if kind == "429":
+            _source_pause[source] = now + max(ra or 0.0, RATE_LIMIT_BASE_S)
+            continue                   # this token rests; the next one may work
+        break                          # network/server error — rotation won't help
+    _fetch_fail.update(kind=last_kind or "net", retry_after=last_ra)
+    return None
+
+
+def _parse_usage_buckets(data: dict) -> Optional[list]:
     buckets = []
 
     # Preferred source: the "limits" array — it is what Claude's own usage
@@ -275,16 +381,53 @@ def fetch_api_usage() -> Optional[list]:
     return buckets or None
 
 
-_api_cache = {"buckets": None, "ts": 0.0, "next": 0.0, "fails": 0}   # throttle + back off
+# throttle + back-off + the projection base: the local counters at the moment
+# of the last successful fetch. Between polls the display shows the LIVE
+# percentages plus only the locally counted growth since that fetch — the local
+# scale never sets the absolute level (gold standard: server values are the
+# single source of truth, local logs only bridge the gap between two syncs).
+_api_cache = {"buckets": None, "ts": 0.0, "next": 0.0, "fails": 0,
+              "base": None, "boundary": None}
+
+
+def _project_buckets(buckets, base, snap) -> list:
+    """Live pct + locally counted delta since the fetch, per bucket.
+
+    Deltas are scaled by the live-learned budgets and clamped to [live, 100];
+    if a local counter shrank (window reset, log rewrite) the raw live value
+    is kept — a projection must never show LESS than the last live truth."""
+    cal = auto_calibration()
+    out = []
+    for b in buckets:
+        pct = b.pct
+        if (b.key == "five_hour" and cal["budget_5h"]
+                and snap.weighted >= base["weighted"]):
+            pct += (snap.weighted - base["weighted"]) / cal["budget_5h"] * 100.0
+        elif (b.key == "seven_day" and cal["weekly_budget"]
+                and snap.week_weighted >= base["week_weighted"]):
+            pct += ((snap.week_weighted - base["week_weighted"])
+                    / cal["weekly_budget"] * 100.0)
+        elif b.key.startswith("weekly_"):
+            name = b.label.split("·")[-1].strip()
+            bud = cal["models"].get(name)
+            prev = base["week_model"].get(name, 0.0)
+            cur = snap.week_by_model_weighted.get(name, 0.0)
+            if bud and cur >= prev:
+                pct += (cur - prev) / bud * 100.0
+        out.append(UsageBucket(key=b.key, label=b.label,
+                               pct=min(100.0, max(b.pct, pct)),
+                               resets_at=b.resets_at))
+    return out
 
 
 def collect_usage(should_stop=None) -> UsageSnapshot:
     """API first (exact numbers), local log estimate as fallback. The usage
     endpoint is polled at most every API_OK_INTERVAL_S; between polls the last
     buckets are reused so the log scan can run every couple of seconds without
-    hammering Anthropic. Repeated failures back off exponentially, and a single
-    blip keeps the last live reading (up to API_STALE_S) instead of flipping the
-    whole panel to the estimate."""
+    hammering Anthropic. Between polls the shown percentages are the last live
+    values plus the locally counted delta (see _project_buckets); repeated
+    failures back off exponentially and only a persistently dead sync (>= 3
+    fails over two intervals) drops the panel to the pure local estimate."""
     fetched_ok = False
     if USE_API_USAGE:
         now_s = time.time()
@@ -298,10 +441,15 @@ def collect_usage(should_stop=None) -> UsageSnapshot:
                 fetched_ok = True
             else:
                 _api_cache["fails"] += 1
-                backoff = min(API_MAX_BACKOFF_S, API_RETRY_S * 2 ** (_api_cache["fails"] - 1))
-                _api_cache["next"] = now_s + backoff
-                if _api_cache["buckets"] is not None and now_s - _api_cache["ts"] > API_STALE_S:
-                    _api_cache["buckets"] = None       # last live reading too old — show the estimate
+                _api_cache["next"] = now_s + _failure_backoff(_api_cache["fails"])
+                # a single blip must NOT flip the panel to the local absolute
+                # scale — the last live reading (plus projection) stays up
+                # until the sync has failed repeatedly for two whole intervals
+                if (_api_cache["buckets"] is not None
+                        and _api_cache["fails"] >= 3
+                        and now_s - _api_cache["ts"] > 2 * API_OK_INTERVAL_S):
+                    _api_cache["buckets"] = None
+                    _api_cache["base"] = None
         buckets = _api_cache["buckets"]
         if buckets:
             # keep the local per-model token counts as extra detail
@@ -310,34 +458,99 @@ def collect_usage(should_stop=None) -> UsageSnapshot:
                 snap = UsageSnapshot(updated_at=datetime.now())
             snap.error = ""
             snap.source = "api"
-            snap.buckets = buckets
-            five = next((b for b in buckets if b.key == "five_hour"), buckets[0])
+            if not fetched_ok and _api_cache["base"] is not None:
+                shown = _project_buckets(buckets, _api_cache["base"], snap)
+            else:
+                shown = buckets
+            snap.buckets = shown
+            snap.live_fetched_at = datetime.fromtimestamp(_api_cache["ts"])
+            five = next((b for b in shown if b.key == "five_hour"), shown[0])
             snap.pct = five.pct
+            # the live window just rolled over -> get fresh numbers right away
+            # (once per boundary; a failing repoll keeps its normal back-off)
+            live_five = next((b for b in buckets if b.key == "five_hour"), None)
+            if (live_five is not None and live_five.resets_at is not None
+                    and datetime.now(timezone.utc) >= live_five.resets_at
+                    and _api_cache["boundary"] != live_five.resets_at):
+                _api_cache["boundary"] = live_five.resets_at
+                _api_cache["next"] = 0.0
 
             # auto-calibrate only from a *freshly fetched* reading: pairing a
             # cached (stale) percentage with the still-growing local token count
             # would slowly skew the learned budget.
             if fetched_ok:
-                budget_5h = weekly_budget = anchor = None
-                model_budgets = {}
-                for b in buckets:
-                    if b.key == "seven_day" and b.resets_at is not None:
-                        anchor = b.resets_at
-                    if b.pct < 3.0:
-                        continue          # too close to zero to divide reliably
-                    if b.key == "five_hour" and snap.weighted > 0:
-                        budget_5h = round(snap.weighted / (b.pct / 100.0))
-                    elif b.key == "seven_day" and snap.week_weighted > 0:
-                        weekly_budget = round(snap.week_weighted / (b.pct / 100.0))
-                    elif b.key.startswith("weekly_"):
-                        name = b.label.split("·")[-1].strip()
-                        wtok = snap.week_by_model_weighted.get(name, 0.0)
-                        if wtok > 0:
-                            model_budgets[name] = round(wtok / (b.pct / 100.0))
-                set_auto_calibration(budget_5h, anchor, weekly_budget,
-                                     model_budgets or None)
+                _calibrate_from_buckets(snap, buckets)
+                _api_cache["base"] = {
+                    "weighted": snap.weighted,
+                    "week_weighted": snap.week_weighted,
+                    "week_model": dict(snap.week_by_model_weighted),
+                }
+            snap.live_state, snap.live_until = "live", None
             return snap
-    return scan_usage(should_stop=should_stop)
+    snap = scan_usage(should_stop=should_stop)
+    snap.live_state, snap.live_until = live_status()
+    return snap
+
+
+def live_status():
+    """Why there are no live numbers right now: ('rate_limited', until) when
+    Anthropic sent a 429, ('no_token', None) without any login, ('error',
+    None) after other failures, ('live'/'off', None) otherwise."""
+    if not USE_API_USAGE:
+        return "off", None
+    if _api_cache["buckets"] is not None:
+        return "live", None
+    kind = _fetch_fail["kind"]
+    if kind == "429":
+        return "rate_limited", datetime.fromtimestamp(_api_cache["next"])
+    if kind == "no_token":
+        return "no_token", None
+    if kind in ("http", "net"):
+        return "error", None
+    return "off", None
+
+
+def _windows_aligned(local_end, live_end, tolerance_s: float) -> bool:
+    if local_end is None or live_end is None:
+        return False
+    return abs((local_end - live_end).total_seconds()) <= tolerance_s
+
+
+def _calibrate_from_buckets(snap, buckets) -> None:
+    """Learn budgets + window boundaries from one fresh live reading.
+
+    The reset boundaries (5h and weekly) are always stored — they re-anchor
+    the local window replay. The budget RATIOS are only trusted when the
+    locally counted window ends where the live one does: pairing a rolling/
+    drifted local window with a fixed live percentage once seeded budgets
+    that were off by 2x (observed live: panel 24 % vs claude.ai 39 %). On
+    the first fetch after a drift only the anchors are stored; the very
+    next scan counts aligned windows and then the ratios calibrate too.
+    """
+    budget_5h = weekly_budget = anchor = session_reset = None
+    model_budgets = {}
+    window = timedelta(hours=WINDOW_HOURS)
+    local_5h_end = snap.oldest + window if snap.oldest is not None else None
+    for b in buckets:
+        if b.key == "five_hour" and b.resets_at is not None:
+            session_reset = b.resets_at
+        if b.key == "seven_day" and b.resets_at is not None:
+            anchor = b.resets_at
+        if b.pct < 3.0:
+            continue              # too close to zero to divide reliably
+        if b.key == "five_hour" and snap.weighted > 0:
+            if _windows_aligned(local_5h_end, b.resets_at, 600):
+                budget_5h = round(snap.weighted / (b.pct / 100.0))
+        elif b.key == "seven_day" and snap.week_weighted > 0:
+            if _windows_aligned(snap.week_reset, b.resets_at, 3600):
+                weekly_budget = round(snap.week_weighted / (b.pct / 100.0))
+        elif b.key.startswith("weekly_"):
+            name = b.label.split("·")[-1].strip()
+            wtok = snap.week_by_model_weighted.get(name, 0.0)
+            if wtok > 0 and _windows_aligned(snap.week_reset, b.resets_at, 3600):
+                model_budgets[name] = round(wtok / (b.pct / 100.0))
+    set_auto_calibration(budget_5h, anchor, weekly_budget,
+                         model_budgets or None, session_reset=session_reset)
 
 
 def _fmt_reset(resets_at: Optional[datetime]) -> str:

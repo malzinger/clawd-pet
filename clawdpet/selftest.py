@@ -168,6 +168,11 @@ def run_selftest() -> int:
     print("[selftest] previews written: panel_preview_api.png, panel_preview_logs.png")
 
     # calibration: budget derived from Claude's own percentage
+    # X2 fix: a live pet may have persisted an auto-calibration in
+    # ~/.clawd/calibration.json — this block (and line 204 below) already
+    # overwrites/reset that state anyway, so clear it up front to make the
+    # baseline assertion hold on machines with a live installation too.
+    reset_auto_calibration()
     assert effective_max_tokens() == MAX_TOKENS and not is_calibrated()
     set_max_tokens_override(int(round(178_000 / 0.65)))
     assert is_calibrated() and effective_max_tokens() == 273_846
@@ -1152,6 +1157,684 @@ def run_selftest() -> int:
     from .macdock import hide_dock_icon
     assert callable(hide_dock_icon)     # not invoked: offscreen has no Dock
     print("[selftest] hook runner + macdock OK")
+
+    # --- usage accuracy: 429 back-off + persisted auto-calibration --------
+    import email.message
+    import urllib.error as _ue
+    from . import api as _api, usage as _usage
+    from .config import API_RETRY_S, RATE_LIMIT_BASE_S, RATE_LIMIT_MAX_S
+    _fail_before = dict(_api._fetch_fail)
+    hdrs = email.message.Message()
+    hdrs["Retry-After"] = "900"
+    e429 = _ue.HTTPError("u", 429, "rl", hdrs, None)
+    assert _api._parse_retry_after(e429) == 900.0
+    e429b = _ue.HTTPError("u", 429, "rl", email.message.Message(), None)
+    assert _api._parse_retry_after(e429b) is None
+    _api._fetch_fail.update(kind="429", retry_after=900.0)
+    assert _api._failure_backoff(1) == 900.0
+    _api._fetch_fail.update(kind="429", retry_after=None)
+    assert _api._failure_backoff(1) == RATE_LIMIT_BASE_S
+    assert _api._failure_backoff(99) == RATE_LIMIT_MAX_S
+    _api._fetch_fail.update(kind="net", retry_after=None)
+    assert _api._failure_backoff(1) == API_RETRY_S       # ordinary blip stays quick
+    cache_before = dict(_api._api_cache)
+    _api._api_cache["buckets"] = None
+    _api._fetch_fail.update(kind="429", retry_after=None)
+    state, until = _api.live_status()
+    assert state == "rate_limited" and until is not None
+    _api._fetch_fail.update(kind="no_token", retry_after=None)
+    assert _api.live_status()[0] == "no_token"
+    _api._api_cache.update(cache_before)
+    _api._fetch_fail.update(_fail_before)
+
+    cal_backup = (_usage.CALIBRATION_FILE, _usage._calibration_loaded,
+                  _usage._AUTO_BUDGET_5H, _usage._WEEKLY_ANCHOR,
+                  _usage._WEEKLY_BUDGET_ALL, dict(_usage._WEEKLY_BUDGET_MODELS))
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            _usage.CALIBRATION_FILE = Path(td) / "calibration.json"
+            _usage._calibration_loaded = True     # skip loading the real file
+            _usage.reset_auto_calibration()
+            anchor = datetime(2026, 7, 19, 20, 59, tzinfo=timezone.utc)
+            _usage.set_auto_calibration(600_000, anchor, 42_000_000,
+                                        {"Fable": 20_000_000})
+            assert _usage.CALIBRATION_FILE.is_file(), "calibration not persisted"
+            # simulate a fresh process: wipe the globals, force a re-load
+            _usage._AUTO_BUDGET_5H = _usage._WEEKLY_ANCHOR = None
+            _usage._WEEKLY_BUDGET_ALL = None
+            _usage._WEEKLY_BUDGET_MODELS = {}
+            _usage._calibration_loaded = False
+            assert _usage.effective_max_tokens() == 600_000
+            assert _usage.weekly_budget_all() == 42_000_000
+            assert _usage.weekly_model_budgets() == {"Fable": 20_000_000}
+            assert _usage.auto_calibration()["anchor"] == anchor
+            _usage.reset_auto_calibration()
+            assert not _usage.CALIBRATION_FILE.exists()
+            assert _usage.effective_max_tokens() >= 1_000_000  # placeholder again
+    finally:
+        (_usage.CALIBRATION_FILE, _usage._calibration_loaded,
+         _usage._AUTO_BUDGET_5H, _usage._WEEKLY_ANCHOR,
+         _usage._WEEKLY_BUDGET_ALL, _usage._WEEKLY_BUDGET_MODELS) = cal_backup
+    print("[selftest] usage 429 backoff + calibration persistence OK")
+
+    # --- native notifications must not run in tests (focus-steal fix) -----
+    from .notify import _applescript_str, post_notification
+    os.environ["CLAWD_NO_NATIVE_NOTIFY"] = "1"
+    assert post_notification("t", "x") is False        # env kill-switch works
+    assert _applescript_str('a"b\\c') == '"a\\"b\\\\c"'
+    print("[selftest] native notify OK")
+
+    # --- X2: hook events + statusline ---
+    from .config import CONTEXT_STALE_S, HOOK_EVENTS
+    from .statusline import (register_statusline, statusline_registered,
+                             unregister_statusline)
+
+    # 1) new events registered + register/unregister round-trip stays idempotent
+    x2_new_events = ("SubagentStart", "SubagentStop", "PostToolUseFailure",
+                     "StopFailure", "PreCompact", "PostCompact", "SessionEnd")
+    for _ev in x2_new_events:
+        assert _ev in HOOK_EVENTS, f"{_ev} missing from HOOK_EVENTS"
+    with tempfile.TemporaryDirectory() as td:
+        sp = Path(td) / "settings.json"
+        sp.write_text("{}", encoding="utf-8")
+        assert register_hooks(sp, 'py "clawd_hook.py"')
+        assert not register_hooks(sp, 'py "clawd_hook.py"'), \
+            "double hook registration not idempotent"
+        x2_data = json.loads(sp.read_text(encoding="utf-8"))
+        for _ev in HOOK_EVENTS:
+            assert len(x2_data["hooks"][_ev]) == 1, f"event {_ev} not registered"
+        assert unregister_hooks(sp)
+        assert not hooks_registered(sp)
+        x2_data = json.loads(sp.read_text(encoding="utf-8"))
+        assert all(arr == [] for arr in x2_data["hooks"].values()), \
+            "unregister left clawd entries behind"
+    print("[selftest] X2 new hook events + idempotent registration OK")
+
+    # 2/3) app handler: subagent counter, failure startle, compaction bubble
+    x2_saved = (capp.dnd, capp.quiet, capp._last_activity,
+                capp._hook_hold_until, capp.pet.pct, capp.pet._activity)
+    capp.dnd = False
+    capp.quiet = False
+    capp.pet.hide()                        # no bubbles while counting
+    capp.pet.set_pct(10)                   # calm quota -> tool mood visible
+    capp.pet.set_activity(None)
+    capp._last_activity = None
+    capp._subagent_count = 0
+    capp._handle_hook_event({"hook_event_name": "SubagentStart"})
+    assert capp._subagent_count == 1
+    assert capp._last_activity == ("working", "Task"), "subagent did not juggle"
+    if "juggle" in capp.pet._sprites.sprites:
+        assert capp.pet.mood == "juggle", f"subagent mood: {capp.pet.mood}"
+    capp._handle_hook_event({"hook_event_name": "SubagentStart"})
+    assert capp._subagent_count == 2
+    capp._handle_hook_event({"hook_event_name": "SubagentStop"})
+    assert capp._subagent_count == 1
+    assert capp._last_activity == ("working", "Task"), "juggle ended too early"
+    capp._handle_hook_event({"hook_event_name": "SubagentStop"})
+    assert capp._subagent_count == 0
+    assert capp._last_activity is None, "activity not cleared at count 0"
+    capp._handle_hook_event({"hook_event_name": "SubagentStop"})
+    assert capp._subagent_count == 0, "subagent count went below 0"
+    capp._handle_hook_event({"hook_event_name": "SubagentStart"})
+    capp._handle_hook_event({"hook_event_name": "SessionStart"})
+    assert capp._subagent_count == 0, "SessionStart did not reset the count"
+    capp._handle_hook_event({"hook_event_name": "SubagentStart"})
+    capp._handle_hook_event({"hook_event_name": "Stop"})
+    assert capp._subagent_count == 0, "Stop did not reset the count"
+    capp._handle_hook_event({"hook_event_name": "SubagentStart"})
+    capp._handle_hook_event({"hook_event_name": "SessionEnd"})
+    assert capp._subagent_count == 0, "SessionEnd did not reset the count"
+    assert capp._last_activity is None, "SessionEnd left activity behind"
+    assert capp._hook_hold_until == 0.0, "SessionEnd kept the mood hold"
+    # old/unknown events (old clawd_hook.py copies) are ignored gracefully
+    capp._handle_hook_event({"hook_event_name": "SomeFutureEvent"})
+    capp._handle_hook_event({})
+    assert capp._last_activity is None and capp._subagent_count == 0
+
+    # failure events: startle path must not raise, activity goes "error"
+    capp._handle_hook_event({"hook_event_name": "PostToolUseFailure"})
+    assert capp._last_activity == ("error", None), "failure not grumpy"
+    if "panic" in capp.pet._sprites.sprites:
+        assert capp.pet.mood == "panic"
+    capp._clear_error_state()
+    assert capp._last_activity is None
+    capp._handle_hook_event({"hook_event_name": "StopFailure"})
+    assert capp._last_activity == ("error", None), "StopFailure not handled"
+    capp._clear_error_state()
+    capp.dnd = True                        # DND: failures do nothing at all
+    capp._handle_hook_event({"hook_event_name": "PostToolUseFailure"})
+    assert capp._last_activity is None, "failure reacted under DND"
+    capp.dnd = False
+
+    # PreCompact shows the bubble + sweeps, PostCompact ends it
+    capp.pet.show()
+    capp._handle_hook_event({"hook_event_name": "PreCompact"})
+    assert capp._compacting is True
+    assert capp._last_activity == ("working", "Compact")
+    if "sweep" in capp.pet._sprites.sprites:
+        assert capp.pet.mood == "sweep", f"compact mood: {capp.pet.mood}"
+    assert capp.bubble.isVisible(), "compact bubble not shown"
+    assert capp.bubble._text == tr("bubble_compact")
+    capp._handle_hook_event({"hook_event_name": "PostCompact"})
+    assert capp._compacting is False
+    assert capp._last_activity is None, "PostCompact did not end the sweep"
+    # compaction while subagents run: PostCompact goes back to juggling
+    capp._handle_hook_event({"hook_event_name": "SubagentStart"})
+    capp._handle_hook_event({"hook_event_name": "PreCompact"})
+    capp._handle_hook_event({"hook_event_name": "PostCompact"})
+    assert capp._last_activity == ("working", "Task"), "juggle lost after compact"
+    capp._handle_hook_event({"hook_event_name": "SessionEnd"})
+    capp.bubble.hide()
+    capp.pet.hide()
+    capp.pet.set_activity(None)
+    (capp.dnd, capp.quiet, capp._last_activity,
+     capp._hook_hold_until, _x2_pct, _x2_act) = x2_saved
+    capp.pet.set_pct(_x2_pct)
+    capp.pet.set_activity(_x2_act)
+    print("[selftest] X2 subagent counter + failure/compact events OK")
+
+    # 4) statusline registration: never clobber a user's own statusline
+    with tempfile.TemporaryDirectory() as td:
+        sp = Path(td) / "settings.json"
+        sl_cmd = 'py "clawd_statusline.py"'
+        sp.write_text("{}", encoding="utf-8")
+        assert not statusline_registered(sp)
+        assert register_statusline(sp, sl_cmd)              # absent -> ours
+        assert statusline_registered(sp)
+        x2_sl = json.loads(sp.read_text(encoding="utf-8"))["statusLine"]
+        assert x2_sl == {"type": "command", "command": sl_cmd}
+        assert not register_statusline(sp, sl_cmd), \
+            "re-registering our statusline should be a no-op"
+        assert unregister_statusline(sp)                    # removes only ours
+        assert "statusLine" not in json.loads(sp.read_text(encoding="utf-8"))
+        assert not unregister_statusline(sp), "double unregister changed settings"
+        foreign = {"statusLine": {"type": "command", "command": "my-own-status"},
+                   "other": 1}
+        sp.write_text(json.dumps(foreign), encoding="utf-8")
+        assert not register_statusline(sp, sl_cmd), \
+            "a foreign statusline was overwritten"
+        assert not statusline_registered(sp)
+        assert not unregister_statusline(sp), "foreign statusline removed"
+        assert json.loads(sp.read_text(encoding="utf-8")) == foreign, \
+            "foreign settings not left untouched"
+    print("[selftest] X2 statusline registration OK")
+
+    # 5) clawd_statusline.py end-to-end: stdout line + authenticated datagram
+    sl_py = Path(__file__).resolve().parent.parent / "clawd_statusline.py"
+    with tempfile.TemporaryDirectory() as td:
+        tokf = Path(td) / "hook_token"
+        tok = ensure_hook_token(tokf)
+        probe = socket_mod.socket(socket_mod.AF_INET, socket_mod.SOCK_DGRAM)
+        probe.bind(("127.0.0.1", 0))
+        probe.settimeout(5.0)
+        env = dict(os.environ,
+                   CLAWD_PET_PORT=str(probe.getsockname()[1]),
+                   CLAWD_TOKEN_FILE=str(tokf))
+        sl_payload = json.dumps({
+            "session_id": "x2-session",
+            "model": {"id": "claude-sonnet-4", "display_name": "Sonnet 4"},
+            "context_window": {"used_percentage": 42.5},
+        })
+        proc = subprocess.run([sys.executable, str(sl_py)],
+                              input=sl_payload.encode("utf-8"),
+                              stdout=subprocess.PIPE, env=env, timeout=10)
+        assert proc.returncode == 0
+        sl_out = proc.stdout.decode("utf-8", errors="replace")
+        assert "42" in sl_out, f"statusline output lacks the pct: {sl_out!r}"
+        raw, _ = probe.recvfrom(65535)
+        ev = parse_hook_datagram(raw, tok)
+        assert ev and isinstance(ev.get("clawd_statusline"), dict), ev
+        assert ev["clawd_statusline"]["context_pct"] == 42.5
+        assert ev["clawd_statusline"]["model"] == "Sonnet 4"
+        assert ev["clawd_statusline"]["session_id"] == "x2-session"
+        # broken stdin: still prints a line, exits 0, sends nothing
+        proc2 = subprocess.run([sys.executable, str(sl_py)],
+                               input=b"{not json", stdout=subprocess.PIPE,
+                               env=env, timeout=10)
+        assert proc2.returncode == 0 and proc2.stdout.strip(), \
+            "statusline must always print something"
+        probe.settimeout(0.3)
+        try:
+            probe.recvfrom(65535)
+            raise AssertionError("broken payload still sent a datagram")
+        except socket_mod.timeout:
+            pass
+        probe.close()
+    print("[selftest] X2 statusline sender e2e OK")
+
+    # 6) panel context row shows fresh values, hides on unknown/stale
+    panel.set_context(63.0, "Sonnet 4")
+    panel.update_snapshot(snap)            # must survive _show_only
+    app.processEvents()
+    x2_row = panel._rows.get("context")
+    assert x2_row is not None, "context row not created"
+    assert not x2_row["name"].isHidden() and not x2_row["bar"].isHidden()
+    assert "63" in x2_row["pct"].text(), x2_row["pct"].text()
+    assert x2_row["reset"].text() == "Sonnet 4"
+    panel.set_context(70.0, None)          # no model -> single compact row
+    assert x2_row["reset"].isHidden(), "empty model line still visible"
+    panel.set_context(None)                # unknown -> hidden
+    assert x2_row["name"].isHidden() and x2_row["bar"].isHidden()
+    panel.set_context(50.0, "Opus")
+    assert not x2_row["name"].isHidden()
+    panel._ctx_ts = time.monotonic() - (CONTEXT_STALE_S + 1)   # went stale
+    panel._refresh_countdown()
+    assert x2_row["name"].isHidden(), "stale context row still shown"
+    panel.set_context(None)
+    # app routing: the datagram payload lands in the panel via the setter
+    capp._handle_statusline({"context_pct": 33.0, "model": "Opus",
+                             "session_id": "s"})
+    assert capp._context_pct == 33.0
+    assert capp.panel._ctx_pct == 33.0 and capp.panel._ctx_model == "Opus"
+    capp._handle_statusline({"context_pct": "garbage"})        # ignored
+    assert capp._context_pct == 33.0
+    capp._handle_statusline({"context_pct": 250.0})            # clamped
+    assert capp._context_pct == 100.0
+    capp.panel.set_context(None)
+    print("[selftest] X2 panel context row OK")
+
+    # --- Y: idle throttle / cursor chase / typing bob / celebrate ---------
+    from PyQt5.QtCore import QPoint
+    from .config import THROTTLE_TICK_MS
+    pet.set_activity(None)
+    pet.set_pct(10)                                   # chill quota mood
+    pet._idle_variant = None
+    pet.enable_wander(False)
+    pet._update_mood()
+    pet._last_active_mono = time.monotonic() - 999    # long idle
+    pet._maybe_throttle()
+    assert pet.throttled, "idle pet must throttle its animation timer"
+    assert pet._anim_timer.interval() == THROTTLE_TICK_MS
+    pet.set_activity(("working", "Edit"))             # any life -> full rate
+    assert not pet.throttled, "activity must restore the frame rate instantly"
+    pet.set_activity(None)
+    print("[selftest] idle throttle OK")
+
+    pet.enable_cursor_chase(True)
+    avail = pet._screen_avail()
+    pet.move(avail.left() + 10, avail.center().y())  # room to walk right
+    start_x = pet.x()
+    pet._chase_test_target = QPoint(pet.x() + pet.width() // 2 + 400,
+                                    avail.center().y())
+    pet._chase_next = 0.0                             # due immediately
+    pet._chase_tick()
+    assert pet._chase_state == "chase", pet._chase_state
+    for _ in range(30):
+        pet._chase_tick()
+    assert pet.x() > start_x, "chase must move the pet toward the cursor"
+    pet._chase_test_target = QPoint(pet.x() + pet.width() // 2, pet.y())
+    pet._chase_tick()                                 # within catch radius
+    assert pet._chase_state == "caught"
+    assert pet.mood == "sleep", "caught cursor -> nap on it"
+    pet._chase_test_target = QPoint(pet.x() + pet.width() // 2 + 500, pet.y())
+    pet._chase_tick()                                 # it escaped
+    assert pet._chase_state == "wait" and pet.mood != "sleep"
+    pet._chase_test_target = None
+    pet.enable_cursor_chase(False)
+    print("[selftest] cursor chase OK")
+
+    pet.set_generating(True)
+    assert pet._generating
+    assert pet.grab() is not None                     # bob path paints fine
+    pet.set_generating(False)
+    assert not pet._generating
+    assert pet.celebrate() is True
+    assert pet._react_active and pet.mood in ("conduct", "juggle", "happy")
+    assert pet.celebrate() is False                   # idempotent while playing
+    pet._stop_throw()                                 # cancel the hop
+    pet._end_reaction()
+    assert not pet._celebrating
+    print("[selftest] typing bob + celebrate OK")
+
+    # --- Y: sprite-pack import (petdex / Codex pet format) ----------------
+    from .art import _pack_mood_for, import_sprite_pack
+    import base64
+    tiny_gif = base64.b64decode(
+        b"R0lGODlhAgACAPAAAP8AAAAAACH5BAAAAAAALAAAAAACAAIAAAICRAEAOw==")
+    assert _pack_mood_for("cat-idle.gif") == "chill"
+    assert _pack_mood_for("clawd-sleeping.gif") == "sleep"
+    assert _pack_mood_for("random-noise.gif") is None
+    with tempfile.TemporaryDirectory() as td:
+        packs = Path(td) / "packs"
+        srcd = Path(td) / "my-pack"
+        srcd.mkdir()
+        (srcd / "idle.gif").write_bytes(tiny_gif)
+        (srcd / "sleeping.gif").write_bytes(tiny_gif)
+        dest = import_sprite_pack(srcd, dest_root=packs)
+        assert dest is not None and (dest / "clawd-idle.gif").is_file()
+        assert (dest / "clawd-sleeping.gif").is_file()
+        loaded = SpriteSet(height=32, sprite_dir=dest)
+        assert "chill" in loaded.sprites, "imported pack must load"
+        # manifest wins over name sniffing
+        srcm = Path(td) / "manifest-pack"
+        srcm.mkdir()
+        (srcm / "a.gif").write_bytes(tiny_gif)
+        (srcm / "manifest.json").write_text('{"states": {"idle": "a.gif"}}')
+        dest2 = import_sprite_pack(srcm, dest_root=packs)
+        assert dest2 is not None and (dest2 / "clawd-idle.gif").is_file()
+        # no idle -> rejected; garbage -> rejected
+        srcb = Path(td) / "bad-pack"
+        srcb.mkdir()
+        (srcb / "sleeping.gif").write_bytes(tiny_gif)
+        assert import_sprite_pack(srcb, dest_root=packs) is None
+        assert import_sprite_pack(Path(td) / "missing", dest_root=packs) is None
+    print("[selftest] sprite-pack import OK")
+
+    # --- X1: Codex integration (rate-limit parsing, notify config, e2e) ---
+    from clawdpet.codex import (_parse_rate_limits, notify_command,
+                                notify_registered, register_notify,
+                                unregister_notify)
+    real_rpc = {"rateLimits": {
+        "limitId": "codex", "planType": "plus",
+        "primary": {"usedPercent": 51, "windowDurationMins": 10080,
+                    "resetsAt": 1784488399},
+        "secondary": {"usedPercent": 7, "windowDurationMins": 300,
+                      "resetsAt": 1784488399},
+    }}                                # shape captured from codex-cli 0.144.1
+    cb = _parse_rate_limits(real_rpc)
+    assert cb and len(cb) == 2
+    assert cb[0].key == "codex_primary" and cb[0].pct == 51.0
+    assert cb[0].resets_at is not None and "Codex" in cb[0].label
+    assert cb[1].pct == 7.0
+    assert _parse_rate_limits({}) is None
+    assert _parse_rate_limits({"rateLimits": {"primary": None}}) is None
+    with tempfile.TemporaryDirectory() as td:
+        cfg = Path(td) / "config.toml"
+        cfg.write_text('model = "gpt-5"\n', encoding="utf-8")
+        line = notify_command("/usr/bin/python3", Path(td) / "codex_notify.py")
+        assert register_notify(line, cfg) is True
+        assert notify_registered(cfg) is True
+        assert register_notify(line, cfg) is False        # idempotent
+        assert 'model = "gpt-5"' in cfg.read_text()
+        assert unregister_notify(cfg) is True
+        assert not notify_registered(cfg)
+        assert 'model = "gpt-5"' in cfg.read_text()
+        cfg.write_text('notify = ["mytool"]\n', encoding="utf-8")
+        assert register_notify(line, cfg) is False        # foreign -> refuse
+        assert not notify_registered(cfg)                 # ... and it is not ours
+        assert unregister_notify(cfg) is False            # never touch foreign
+        assert cfg.read_text() == 'notify = ["mytool"]\n'
+    # codex_turn routing: respects DND, alerts otherwise (no tray -> no raise)
+    capp.dnd = True
+    capp._handle_codex_turn({"turn_id": "t1"})
+    capp.dnd = False
+    was = capp._last_alert_mono
+    capp._last_alert_mono = 0.0
+    capp._handle_codex_turn({"turn_id": "t1", "message": "done"})
+    capp._last_alert_mono = was
+    print("[selftest] codex rate limits + notify config OK")
+
+    # codex_notify.py end-to-end against a probe socket
+    import socket as socket_mod
+    import subprocess as sp
+    probe = socket_mod.socket(socket_mod.AF_INET, socket_mod.SOCK_DGRAM)
+    probe.bind(("127.0.0.1", 0))
+    probe.settimeout(5.0)
+    with tempfile.TemporaryDirectory() as td:
+        tokf = Path(td) / "tok"
+        tokf.write_text("cafebabe" * 4, encoding="utf-8")
+        env = dict(os.environ,
+                   CLAWD_PET_PORT=str(probe.getsockname()[1]),
+                   CLAWD_TOKEN_FILE=str(tokf))
+        script = Path(__file__).resolve().parent.parent / "codex_notify.py"
+        evt = json.dumps({"type": "agent-turn-complete", "turn-id": "abc",
+                          "last-assistant-message": "done!"})
+        rc = sp.run([sys.executable, str(script), evt], env=env,
+                    timeout=15).returncode
+        assert rc == 0
+        data, _ = probe.recvfrom(65535)
+        tok, _, body = data.partition(b"\n")
+        assert tok.decode() == "cafebabe" * 4
+        payload = json.loads(body)
+        assert payload["codex_turn"]["turn_id"] == "abc"
+        # non-turn events send nothing and still exit 0
+        rc = sp.run([sys.executable, str(script),
+                     json.dumps({"type": "something-else"})],
+                    env=env, timeout=15).returncode
+        assert rc == 0
+    probe.close()
+    # panel line renders from codex buckets
+    snap_cdx = UsageSnapshot(updated_at=datetime.now())
+    snap_cdx.weighted = 1.0
+    snap_cdx.codex_buckets = cb
+    panel._update_extras(snap_cdx)
+    assert panel.codex_label.isVisibleTo(panel) or panel.codex_label.text()
+    assert "Codex" in panel.codex_label.text()
+    print("[selftest] codex notify e2e + panel line OK")
+
+    # --- integration: celebrate-on-reset, incident line, menu entries -----
+    from clawdpet import status_check as sc_mod
+    sc_backup = dict(sc_mod._cache)
+    assert sc_mod.anthropic_sick(now=1e9, fetch=lambda: "major") is True
+    assert sc_mod.anthropic_sick(now=1e9 + 5,
+                                 fetch=lambda: "none") is True   # throttled
+    assert sc_mod.anthropic_sick(now=1e9 + 700, fetch=lambda: "none") is False
+    assert sc_mod.anthropic_sick(now=1e9 + 1400, fetch=lambda: None) is False
+    sc_mod._cache.update(sc_backup)
+    panel.set_incident(True)
+    assert panel.incident_label.isVisibleTo(panel)
+    assert "status.anthropic.com" in panel.incident_label.text()
+    panel.set_incident(False)
+    assert not panel.incident_label.isVisibleTo(panel)
+    # a quota reset makes the pet celebrate (DND suppresses it)
+    capp.dnd = False
+    capp.pet._react_active = False
+    capp.pet._celebrating = False
+    capp._prev_pct["api"] = 90.0
+    capp._notify_transition("api", 3.0)
+    assert capp.pet._celebrating, "quota reset must trigger a celebration"
+    capp.pet._stop_throw()
+    capp.pet._end_reaction()
+    capp.dnd = True
+    capp._prev_pct["api"] = 90.0
+    capp._notify_transition("api", 3.0)
+    assert not capp.pet._celebrating, "DND must suppress the celebration"
+    capp.dnd = False
+    # typing-along follows hook-driven working state
+    capp._handle_hook_event({"hook_event_name": "PreToolUse",
+                             "tool_name": "Edit"})
+    assert capp.pet._generating, "working hook must start the typing bob"
+    capp._handle_hook_event({"hook_event_name": "Stop"})
+    assert not capp.pet._generating
+    # new tray entries exist (codex entry only with a codex binary present)
+    menu2 = capp.build_menu(None)
+    acts2 = [a.text() for a in menu2.actions() if a.text()]
+    assert tr("menu_chase") in acts2, "cursor-chase toggle missing"
+    assert tr("menu_pack_import") in acts2, "pack import entry missing"
+    import shutil as _sh
+    if _sh.which("codex"):
+        assert (tr("menu_codex_notify_on") in acts2
+                or tr("menu_codex_notify_off") in acts2)
+    menu2.deleteLater()
+    print("[selftest] integration wiring OK")
+
+    # --- usage accuracy round 2: session anchor + pairing guard -----------
+    from clawdpet.api import _calibrate_from_buckets, _windows_aligned, UsageBucket as UB
+    utc = timezone.utc
+    win_backup = (_usage._SESSION_ANCHOR, _usage._calibration_loaded,
+                  _usage.CALIBRATION_FILE)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            _usage.CALIBRATION_FILE = Path(td) / "cal.json"
+            _usage._calibration_loaded = True
+            now2 = datetime(2026, 7, 14, 15, 0, tzinfo=utc)
+            ts_all = [datetime(2026, 7, 14, h, 0, tzinfo=utc) for h in (8, 11, 14)]
+            # live says the window ends 17:00 -> it started 12:00, replay beaten
+            _usage._SESSION_ANCHOR = datetime(2026, 7, 14, 17, 0, tzinfo=utc)
+            ws = _current_window_start(ts_all, now2)
+            assert ws == datetime(2026, 7, 14, 12, 0, tzinfo=utc), ws
+            # boundary already passed -> the first message after it opens a window
+            _usage._SESSION_ANCHOR = datetime(2026, 7, 14, 13, 0, tzinfo=utc)
+            ws = _current_window_start(ts_all, now2)
+            assert ws == datetime(2026, 7, 14, 14, 0, tzinfo=utc), ws
+            _usage._SESSION_ANCHOR = None
+            # pairing guard: misaligned local window must NOT calibrate the
+            # budget but must still store both reset anchors
+            _usage.reset_auto_calibration()
+            snap_g = UsageSnapshot(updated_at=datetime.now())
+            snap_g.weighted = 500_000.0
+            snap_g.week_weighted = 10_000_000.0
+            snap_g.oldest = datetime(2026, 7, 14, 9, 45, tzinfo=utc)   # ends 14:45
+            snap_g.week_reset = None                                   # rolling
+            live_b = [UB("five_hour", "5h", 51.0,
+                         datetime(2026, 7, 14, 17, 0, tzinfo=utc)),    # ends 17:00
+                      UB("seven_day", "week", 39.0,
+                         datetime(2026, 7, 19, 21, 0, tzinfo=utc))]
+            _calibrate_from_buckets(snap_g, live_b)
+            cal_g = _usage.auto_calibration()
+            assert cal_g["budget_5h"] is None, "misaligned pairing must be skipped"
+            assert cal_g["weekly_budget"] is None
+            assert cal_g["session_reset"] == live_b[0].resets_at
+            assert cal_g["anchor"] == live_b[1].resets_at
+            # aligned windows -> both budgets calibrate
+            snap_g.oldest = datetime(2026, 7, 14, 12, 0, tzinfo=utc)   # ends 17:00
+            snap_g.week_reset = datetime(2026, 7, 19, 21, 0, tzinfo=utc)
+            _calibrate_from_buckets(snap_g, live_b)
+            cal_g = _usage.auto_calibration()
+            assert cal_g["budget_5h"] == round(500_000 / 0.51)
+            assert cal_g["weekly_budget"] == round(10_000_000 / 0.39)
+            assert _windows_aligned(None, live_b[0].resets_at, 600) is False
+            _usage.reset_auto_calibration()
+    finally:
+        (_usage._SESSION_ANCHOR, _usage._calibration_loaded,
+         _usage.CALIBRATION_FILE) = win_backup
+    # an estimate over 100 % may panic but never assert the hard limit
+    snap_lim = UsageSnapshot(updated_at=datetime.now())
+    snap_lim.source = "logs"
+    snap_lim.pct = 228.4
+    snap_lim.entries = 5
+    pet.set_snapshot(snap_lim)
+    assert pet._quota_mood == "panic", pet._quota_mood
+    snap_lim.source = "api"
+    pet.set_snapshot(snap_lim)
+    assert pet._quota_mood == "limit", "live data must still assert the limit"
+    pet.set_pct(10)                                   # restore chill for later blocks
+    print("[selftest] session anchor + pairing guard OK")
+
+    # --- token rotation: per-source 429 pause + read-only CC token --------
+    from clawdpet.api import _claude_code_token, fetch_api_usage
+    creds_backup = api_mod.CREDENTIALS_FILE
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            cf = Path(td) / "creds.json"
+            api_mod.CREDENTIALS_FILE = cf
+            good_ms = int(time.time() * 1000 + 3600_000)
+            cf.write_text(json.dumps({"claudeAiOauth": {
+                "accessToken": "cc-tok", "expiresAt": good_ms}}))
+            if sys.platform != "darwin":
+                assert _claude_code_token() == "cc-tok"
+            else:
+                assert _claude_code_token() == "cc-tok"   # file wins, no keychain
+            cf.write_text(json.dumps({"claudeAiOauth": {
+                "accessToken": "cc-old", "expiresAt": 1}}))
+            assert _claude_code_token() is None            # expired -> unusable
+    finally:
+        api_mod.CREDENTIALS_FILE = creds_backup
+    rot_backup = (api_mod._clawd_own_token, api_mod._claude_code_token,
+                  api_mod._fetch_usage_with, dict(api_mod._source_pause),
+                  os.environ.pop("CLAWD_NO_API", None))
+    try:
+        api_mod._source_pause.clear()
+        api_mod._clawd_own_token = lambda: "own-tok"
+        api_mod._claude_code_token = lambda: "cc-tok"
+        calls = []
+        def fake_fetch(token):
+            calls.append(token)
+            if token == "own-tok":
+                return None, "429", 1200.0                # own token locked out
+            return {"limits": [{"kind": "session", "percent": 72.0,
+                                "resets_at": None}]}, None, None
+        api_mod._fetch_usage_with = fake_fetch
+        got = fetch_api_usage()
+        assert got and got[0].pct == 72.0, "rotation must fall back to CC token"
+        assert calls == ["own-tok", "cc-tok"]
+        assert api_mod._source_pause.get("own", 0) > time.time() + 600
+        calls.clear()
+        got = fetch_api_usage()                            # own still paused
+        assert got and calls == ["cc-tok"], "paused source must be skipped"
+        api_mod._fetch_usage_with = lambda tok: (None, "429", 60.0)
+        api_mod._source_pause.clear()
+        assert fetch_api_usage() is None                   # all limited -> None
+        assert api_mod._fetch_fail["kind"] == "429"
+    finally:
+        (api_mod._clawd_own_token, api_mod._claude_code_token,
+         api_mod._fetch_usage_with, pause_prev, env_prev) = rot_backup
+        api_mod._source_pause.clear()
+        api_mod._source_pause.update(pause_prev)
+        if env_prev is not None:
+            os.environ["CLAWD_NO_API"] = env_prev
+        api_mod._fetch_fail.update(kind=None, retry_after=None)
+    print("[selftest] token rotation OK")
+
+    # --- live-first display: projection, stale grace, mtime reload --------
+    from clawdpet.api import _project_buckets
+    cal_bk2 = (_usage.CALIBRATION_FILE, _usage._calibration_loaded,
+               _usage._calibration_mtime)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            _usage.CALIBRATION_FILE = Path(td) / "cal.json"
+            _usage._calibration_loaded = True
+            _usage._calibration_mtime = None
+            _usage.reset_auto_calibration()
+            _usage.set_auto_calibration(
+                1_000_000, datetime(2026, 7, 19, 21, 0, tzinfo=timezone.utc),
+                10_000_000, {"Fable": 5_000_000},
+                session_reset=datetime(2026, 7, 14, 17, 0, tzinfo=timezone.utc))
+            live = [UB("five_hour", "5h", 50.0, None),
+                    UB("seven_day", "week", 30.0, None),
+                    UB("weekly_fable", "Weekly · Fable", 40.0, None)]
+            base = {"weighted": 100_000.0, "week_weighted": 1_000_000.0,
+                    "week_model": {"Fable": 500_000.0}}
+            snap_p = UsageSnapshot(updated_at=datetime.now())
+            snap_p.weighted = 150_000.0            # +50k of 1M budget -> +5 pp
+            snap_p.week_weighted = 1_200_000.0     # +200k of 10M -> +2 pp
+            snap_p.week_by_model_weighted = {"Fable": 750_000.0}  # +250k/5M -> +5 pp
+            shown = _project_buckets(live, base, snap_p)
+            got = {b.key: round(b.pct, 1) for b in shown}
+            assert got == {"five_hour": 55.0, "seven_day": 32.0,
+                           "weekly_fable": 45.0}, got
+            snap_p.weighted = 50_000.0             # counter SHRANK (reset/rewrite)
+            shown = _project_buckets(live, base, snap_p)
+            assert shown[0].pct == 50.0, "projection must never go below live"
+            snap_p.weighted = 10_000_000.0         # huge delta -> clamped
+            assert _project_buckets(live, base, snap_p)[0].pct == 100.0
+            # mtime-aware reload: an EXTERNAL write is picked up lazily
+            _usage.CALIBRATION_FILE.write_text(
+                json.dumps({"budget_5h": 777_000, "weekly_budget": None,
+                            "models": {}, "anchor": None,
+                            "session_reset": None}), encoding="utf-8")
+            import os as _os
+            _os.utime(_usage.CALIBRATION_FILE, ns=(
+                _usage.CALIBRATION_FILE.stat().st_atime_ns,
+                _usage.CALIBRATION_FILE.stat().st_mtime_ns + 1_000_000))
+            assert _usage.effective_max_tokens() == 777_000, \
+                "external calibration write must be picked up without restart"
+            _usage.reset_auto_calibration()
+    finally:
+        (_usage.CALIBRATION_FILE, _usage._calibration_loaded,
+         _usage._calibration_mtime) = cal_bk2
+    # a single failed poll must keep the live buckets (grace: 3 fails + 2x poll)
+    cache_bk2 = dict(api_mod._api_cache)
+    api_mod._api_cache.update(buckets=[UB("five_hour", "5h", 50.0, None)],
+                              ts=time.time() - 100, fails=1, base=None)
+    assert api_mod._api_cache["buckets"] is not None
+    api_mod._api_cache.update(cache_bk2)
+    print("[selftest] live-first projection + reload OK")
+
+    # --- focus-steal fix: raise_() must never activate the app ------------
+    assert os.environ.get("QT_MAC_SET_RAISE_PROCESS") == "0", \
+        "raise_() app-activation escape hatch must be set at import time"
+    raised = []
+    bub2 = SpeechBubble()
+    bub2.raise_ = lambda: raised.append(1)
+    bub2.show_text("focus test", pet, 50)
+    if sys.platform == "darwin":
+        assert not raised, "raise_() on macOS activates the app — must be skipped"
+    else:
+        assert raised, "non-mac keeps raise_ for stacking"
+    bub2.hide()
+    bub2.deleteLater()
+    print("[selftest] no-activate raise OK")
 
     print("[selftest] OK")
     del app

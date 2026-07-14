@@ -8,17 +8,28 @@ if TYPE_CHECKING:                      # only for the Optional["ClawdApp"] hint
     from .app import ClawdApp
 
 from PyQt5.QtCore import QElapsedTimer, QRect, QRectF, QSize, Qt, QTimer
-from PyQt5.QtGui import QColor, QGuiApplication, QPainter, QPixmap, QRegion
+from PyQt5.QtGui import QColor, QCursor, QGuiApplication, QPainter, QPixmap, QRegion
 from PyQt5.QtWidgets import QWidget
 
 from .art import ArtState, ClawdArt, SpriteSet
 from .config import (
+    CELEBRATE_HOP_V,
+    CELEBRATE_MS,
+    CHASE_RELEASE_PX,
+    CHASE_SPEED_PX,
+    CHASE_STOP_SHORT_PX,
+    CHASE_TICK_MS,
+    CHASE_WAIT_RANGE_S,
     PET_HEIGHT,
+    THROTTLE_IDLE_S,
+    THROTTLE_TICK_MS,
     THROW_BOUNCE,
     THROW_FRICTION,
     THROW_GRAVITY,
     THROW_MIN_SPEED,
     THROW_STOP_SPEED,
+    TYPING_BOB_PERIOD_MS,
+    TYPING_BOB_PX,
     WANDER_PAUSE_RANGE_S,
     WANDER_SPEED_PX,
     WANDER_TICK_MS,
@@ -130,6 +141,19 @@ class PetWidget(QWidget):
         # F8: click-through around the sprite (opt-in)
         self._click_through = False
 
+        # Y: idle throttling, cursor chase, typing-along, celebration
+        self._last_active_mono = time.monotonic()
+        self._chase_enabled = False
+        self._chase_state = "wait"     # "wait" | "chase" | "caught"
+        self._chase_next = 0.0         # monotonic time of the next chase attempt
+        self._chase_carry = 0.0        # sub-pixel movement accumulator
+        self._chase_test_target = None  # selftest injects a QPoint target here
+        self._chase_timer = QTimer(self)
+        self._chase_timer.setInterval(CHASE_TICK_MS)
+        self._chase_timer.timeout.connect(self._chase_tick)
+        self._generating = False       # Claude is generating -> typing-along bob
+        self._celebrating = False
+
         self._anim_timer = QTimer(self)
         self._anim_timer.timeout.connect(self._tick)
         self._anim_timer.start(self.ANIM_TICK_MS)
@@ -184,8 +208,14 @@ class PetWidget(QWidget):
         idle = ((snap.source == "logs" and snap.entries == 0)
                 or (snap.source == "api" and snap.pct <= 0))
         self.pct = snap.pct
+        mood_pct = snap.pct
+        if snap.source == "logs" and mood_pct >= 100.0:
+            # an estimate may look alarmed, but only LIVE data may assert the
+            # hard "over the limit" state — a drifted local window once showed
+            # 228 % while the real usage was at 51 %
+            mood_pct = 99.0
         self._quota_mood = ("sleep" if (not snap.error and idle)
-                            else mood_for_pct(snap.pct))
+                            else mood_for_pct(mood_pct))
         self._update_mood()
         if snap.error:
             self.setToolTip(snap.error)
@@ -204,7 +234,74 @@ class PetWidget(QWidget):
         """activity: None or (kind, tool); kind in working/waiting/needs_input/error."""
         if activity != self._activity:
             self._activity = activity
+            self._mark_active()
             self._update_mood()
+
+    # ---------------------------------------------- idle throttle (Y)
+
+    @property
+    def throttled(self) -> bool:
+        """True while the animation timer runs at the slow idle rate."""
+        return self._anim_timer.interval() > self.ANIM_TICK_MS
+
+    def _mark_active(self):
+        """Something happened — full frame rate, restart the idle countdown."""
+        self._last_active_mono = time.monotonic()
+        if self._anim_timer.interval() != self.ANIM_TICK_MS:
+            self._anim_timer.setInterval(self.ANIM_TICK_MS)
+
+    def _idle_now(self) -> bool:
+        return (self.mood in ("chill", "sleep")
+                and not self._react_active
+                and self._activity is None
+                and not self._generating
+                and self._wander_state != "walk"
+                and not self._throw_on
+                and self._chase_state != "chase"
+                and not self.underMouse())
+
+    def _maybe_throttle(self):
+        """Idle pets must not keep a 30 fps timer alive (battery/CPU): after
+        THROTTLE_IDLE_S of true idleness the frame interval drops; any state
+        change goes through _mark_active() and restores it instantly."""
+        if not self._idle_now():
+            self._mark_active()
+            return
+        if (time.monotonic() - self._last_active_mono >= THROTTLE_IDLE_S
+                and self._anim_timer.interval() != THROTTLE_TICK_MS):
+            self._anim_timer.setInterval(THROTTLE_TICK_MS)
+
+    # ---------------------------------------------- typing-along + jubilee (Y)
+
+    def set_generating(self, on: bool):
+        """Claude is generating -> Clawd 'types along' with a subtle bob."""
+        on = bool(on)
+        if on == self._generating:
+            return
+        self._generating = on
+        if on:
+            self._mark_active()
+        self.update()
+
+    def celebrate(self) -> bool:
+        """One-shot ~3 s celebration (quota reset etc.): the liveliest sprite
+        available plus a happy little hop through the throw physics. Returns
+        True if it started; idempotent while one is already playing."""
+        loaded = self._sprites.sprites
+        if not loaded or self._react_active or self._celebrating:
+            return False
+        want = next((m for m in ("conduct", "juggle", "happy")
+                     if m in loaded), None)
+        if want is None:
+            return False
+        self._celebrating = True
+        self._react_active = True
+        self._mark_active()
+        self._set_mood(want)
+        self._react_timer.start(CELEBRATE_MS)
+        if not self._throw_active:
+            self._start_throw(0.0, -CELEBRATE_HOP_V)
+        return True
 
     def _update_mood(self):
         """Combine quota mood with live activity: quota alarms + reactions win.
@@ -226,10 +323,13 @@ class PetWidget(QWidget):
             elif kind == "error":
                 mood = "panic"
         if mood == "chill":
-            if (self._wander_enabled and self._wander_state == "walk"
+            if self._chase_state == "caught":
+                mood = "sleep"                     # napping on the caught cursor
+            elif (((self._wander_enabled and self._wander_state == "walk")
+                    or self._chase_state == "chase")
                     and "carry" in self._sprites.sprites):
-                # walking gait while wandering (F5): the carrying gif is the
-                # only one with a walk cycle — Clawd strolls with his box
+                # walking gait while wandering (F5) or chasing the cursor (Y):
+                # the carrying gif is the only one with a walk cycle
                 mood = "carry"
             elif self._idle_variant:
                 mood = self._idle_variant          # play the random idle flourish
@@ -281,6 +381,7 @@ class PetWidget(QWidget):
 
     def _end_reaction(self):
         self._react_active = False
+        self._celebrating = False
         self._update_mood()
 
     def _tick_idle(self):
@@ -302,6 +403,7 @@ class PetWidget(QWidget):
         if mood != self.mood:
             prev = self._current_pixmap()   # freeze the OLD mood before switching
             self.mood = mood
+            self._mark_active()             # full frame rate for the transition
             self._apply_mood(prev)
 
     def _apply_mood(self, prev: Optional[QPixmap] = None):
@@ -322,6 +424,7 @@ class PetWidget(QWidget):
         return sprite.pixmaps[sprite.frame_at(self._clock.elapsed())]
 
     def _tick(self):
+        self._maybe_throttle()
         if self._sprites.sprites:
             self.update()      # sprite timing is derived from the clock
             return
@@ -361,6 +464,10 @@ class PetWidget(QWidget):
         p.setOpacity(min(1.0, opacity))
         x = (self.width() - pm.width()) // 2
         y = self.height() - pm.height()          # feet on the ground
+        if self._generating and not self._throw_on:
+            # typing-along (Y): a subtle ~8 Hz bob while Claude generates
+            y -= TYPING_BOB_PX * ((self._clock.elapsed()
+                                   // TYPING_BOB_PERIOD_MS) % 2)
         if self._wander_facing < 0:
             # walking left: mirror the frame around its own vertical center —
             # the GIFs' native facing is kept for walking right
@@ -436,6 +543,7 @@ class PetWidget(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
+            self._mark_active()
             if self._throw_active:
                 self._stop_throw()     # catch a flying Clawd mid-air
             self._press_global = event.globalPos()
@@ -514,6 +622,7 @@ class PetWidget(QWidget):
                     and self.owner.panel.isVisible())   # panel open
                 or self._react_active                   # petting reaction
                 or self._throw_active                   # flying (F12)
+                or self._chase_state != "wait"          # chasing/napping (Y)
                 or self._activity is not None           # visibly working
                 or self._quota_mood != "chill")         # alarmed or asleep
 
@@ -562,6 +671,95 @@ class PetWidget(QWidget):
         if self.owner:
             self.owner.pet_moved()       # a visible bubble follows along
 
+    # -------------------------------------------------- cursor chase (Y)
+
+    def enable_cursor_chase(self, on: bool):
+        """Opt-in oneko mode: while idle, Clawd occasionally chases the mouse
+        cursor along the floor, catches it, and naps on it until it escapes."""
+        self._chase_enabled = bool(on)
+        if self._chase_enabled:
+            self._chase_state = "wait"
+            self._chase_next = (time.monotonic()
+                                + random.uniform(*CHASE_WAIT_RANGE_S))
+            self._chase_timer.start()
+        else:
+            self._chase_timer.stop()
+            self._chase_state = "wait"
+            self._update_mood()
+
+    def _chase_target_pos(self):
+        if self._chase_test_target is not None:   # deterministic in tests
+            return self._chase_test_target
+        return QCursor.pos()
+
+    def _chase_rearm(self, now: float):
+        self._chase_state = "wait"
+        self._chase_next = now + random.uniform(*CHASE_WAIT_RANGE_S)
+        self._update_mood()
+
+    def _chase_blocked(self) -> bool:
+        """Chasing yields to everything else the pet might be doing."""
+        return (self._press_global is not None          # mid-drag
+                or self.underMouse()
+                or (self.owner is not None
+                    and self.owner.panel.isVisible())
+                or self._react_active
+                or self._throw_active
+                or self._activity is not None
+                or self._generating
+                or self._quota_mood != "chill"
+                or (self._wander_enabled and self._wander_state == "walk"))
+
+    def _chase_tick(self):
+        now = time.monotonic()
+        if self._chase_state == "caught":
+            target = self._chase_target_pos()
+            cx = self.x() + self.width() // 2
+            if abs(target.x() - cx) > CHASE_RELEASE_PX:
+                self._chase_rearm(now)               # it escaped — wake up
+            return
+        if self._chase_blocked():
+            if self._chase_state == "chase":
+                self._chase_rearm(now)
+            return
+        if self._chase_state == "wait":
+            if now >= self._chase_next:
+                self._chase_state = "chase"
+                self._chase_carry = 0.0
+                self._mark_active()
+                self._update_mood()                  # walk cycle on
+            return
+        # state "chase": scuttle horizontally toward the cursor
+        target = self._chase_target_pos()
+        avail = self._screen_avail()
+        if not avail.contains(target):               # cursor left this screen
+            self._chase_rearm(now)
+            return
+        cx = self.x() + self.width() // 2
+        dx = target.x() - cx
+        catch_px = self.width() // 2 + CHASE_STOP_SHORT_PX
+        if abs(dx) <= catch_px:
+            self._chase_state = "caught"             # gotcha — nap on it
+            self._update_mood()
+            return
+        direction = 1 if dx > 0 else -1
+        self._chase_carry += CHASE_SPEED_PX * direction
+        step = int(self._chase_carry)
+        self._chase_carry -= step
+        if step == 0:
+            return
+        left, right = avail.left(), avail.right() - self.width()
+        x = max(left, min(self.x() + step, right))
+        if x == self.x():                            # pinned at a screen edge
+            self._chase_rearm(now)
+            return
+        if self._wander_facing != direction:
+            self._wander_facing = direction          # reuse the blit mirror
+            self.update()
+        self.move(x, self.y())
+        if self.owner:
+            self.owner.pet_moved()
+
     # -------------------------------------------------- throw physics (F12)
 
     @property
@@ -582,6 +780,7 @@ class PetWidget(QWidget):
         return (p1.x() - p0.x()) / dt, (p1.y() - p0.y()) / dt
 
     def _start_throw(self, vx: float, vy: float):
+        self._mark_active()
         self._throw_on = True
         self._throw_v = [vx, vy]
         self._throw_pos = [float(self.x()), float(self.y())]
@@ -671,6 +870,7 @@ class PetWidget(QWidget):
     # -------------------------------------------------- hover handling
 
     def enterEvent(self, event):
+        self._mark_active()
         if self.owner:
             self.owner.hover_panel()
         self._startle()                # approaching a sleeping Clawd wakes him

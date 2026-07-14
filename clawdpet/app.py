@@ -1,5 +1,6 @@
 """Application controller + entry point — wires pet, panel, tray, scanner."""
 import json
+import os
 import sys
 import tempfile
 import time
@@ -7,6 +8,13 @@ import webbrowser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+
+# Qt on macOS activates the WHOLE app inside QWidget.raise_() when it is
+# inactive ([NSApp activateIgnoringOtherApps:]) — so every reaction bubble
+# stole the keyboard focus from whatever the user was typing in. The escape
+# hatch is documented in Qt's cocoa plugin and must be set before the
+# QApplication exists, hence at import time. setdefault: a user override wins.
+os.environ.setdefault("QT_MAC_SET_RAISE_PROCESS", "0")
 
 from PyQt5.QtCore import (
     QLockFile,
@@ -38,9 +46,17 @@ from .api import (
     collect_usage,
     force_live_refetch,
 )
-from .art import make_app_icon
+from .art import import_sprite_pack, make_app_icon
 from .autostart import autostart_enabled, autostart_supported, set_autostart
 from .bubble import SpeechBubble
+from .codex import (
+    codex_available,
+    codex_usage,
+    notify_command as codex_notify_command,
+    notify_registered as codex_notify_registered,
+    register_notify,
+    unregister_notify,
+)
 from .config import (
     ACTIVITY_POLL_MS,
     ALERT_COOLDOWN_S,
@@ -76,6 +92,12 @@ from .hooks import (
     unregister_permission_hook,
 )
 from .permission_bubble import PermissionBubble
+from .status_check import anthropic_sick
+from .statusline import (
+    register_statusline,
+    statusline_registered,
+    unregister_statusline,
+)
 from .i18n import (
     fmt_de,
     fmt_pct_de,
@@ -86,13 +108,14 @@ from .i18n import (
     tr,
 )
 from .moods import mood_for_pct
+from .notify import post_notification
 from .panel import PanelWidget
 from .pet import PetWidget
 from .update import UpdateThread, is_trusted_update_url, version_is_newer
 from .usage import (
     UsageSnapshot,
     _parse_iso_ts,
-    auto_calibration,
+    auto_budget_active,
     burn_eta,
     is_calibrated,
     notify_decision,
@@ -110,6 +133,16 @@ class ScanThread(QThread):
             snap = collect_usage(should_stop=self.isInterruptionRequested)
         except Exception as exc:  # never let the worker die silently
             snap = UsageSnapshot(error=tr("err_scan", e=exc), updated_at=datetime.now())
+        try:
+            # X1: Codex rate limits ride along — throttled internally, and the
+            # subprocess spawn may block, which is exactly why it happens here
+            snap.codex_buckets = codex_usage()
+        except Exception:
+            snap.codex_buckets = None
+        try:
+            snap.anthropic_sick = anthropic_sick()   # 10-min throttle inside
+        except Exception:
+            snap.anthropic_sick = False
         self.result.emit(snap)
 # ======================================================================
 #  Application controller — wires pet, panel, tray and scanner together
@@ -139,18 +172,27 @@ class ClawdApp:
         except (TypeError, ValueError):
             self.settings.remove("max_tokens")
 
-        # restore auto-calibration learned from previous live API syncs
-        try:
-            anchor_raw = self.settings.value("weekly_anchor", "") or ""
-            set_auto_calibration(
-                budget_5h=int(self.settings.value("auto_budget_5h", 0) or 0) or None,
-                weekly_anchor=_parse_iso_ts(anchor_raw) if anchor_raw else None,
-                weekly_budget=int(self.settings.value("weekly_budget_all", 0) or 0) or None,
-                weekly_model_budgets=json.loads(
-                    self.settings.value("weekly_budget_models", "") or "{}") or None,
-            )
-        except (TypeError, ValueError):
-            pass
+        # Auto-calibration lives in ~/.clawd/calibration.json ONLY (loaded
+        # lazily by clawdpet.usage). It used to be mirrored in QSettings too,
+        # and the startup restore-from-QSettings clobbered a fresher file
+        # with stale values after every pet restart — two persistence layers
+        # fighting each other. One-time migration: seed the file from any
+        # leftover QSettings values, then delete those keys for good.
+        if not auto_budget_active():
+            try:
+                anchor_raw = self.settings.value("weekly_anchor", "") or ""
+                set_auto_calibration(
+                    budget_5h=int(self.settings.value("auto_budget_5h", 0) or 0) or None,
+                    weekly_anchor=_parse_iso_ts(anchor_raw) if anchor_raw else None,
+                    weekly_budget=int(self.settings.value("weekly_budget_all", 0) or 0) or None,
+                    weekly_model_budgets=json.loads(
+                        self.settings.value("weekly_budget_models", "") or "{}") or None,
+                )
+            except (TypeError, ValueError):
+                pass
+        for _k in ("auto_budget_5h", "weekly_budget_all",
+                   "weekly_anchor", "weekly_budget_models"):
+            self.settings.remove(_k)
 
         self.pet = PetWidget(self)
         self.panel = PanelWidget()
@@ -165,6 +207,8 @@ class ClawdApp:
         self.dnd = self.settings.value("dnd", False, type=bool)   # master mute
         self.wander = self.settings.value("wander", False, type=bool)
         self.click_through = self.settings.value("click_through", False, type=bool)
+        self.cursor_chase = self.settings.value("cursor_chase", False, type=bool)
+        self._was_sick = False           # Anthropic incident edge detection
         # burn-rate history and last pct are kept PER SOURCE ("api"/"logs"):
         # the two modes report on different absolute scales, so cross-comparing
         # them would fake resets — but a transient api->logs->api fallback (an
@@ -187,6 +231,12 @@ class ClawdApp:
         self._work_log = None             # which session log that phase belongs to
         self._last_alert_mono = 0.0       # rate-limit "your turn" alerts
         self._hook_hold_until = 0.0
+        # X2: hook-driven state — running subagents (juggle while > 0), an
+        # active context compaction (sweep), and the latest context-window
+        # fill reported by the statusline sender (clawd_statusline.py)
+        self._subagent_count = 0
+        self._compacting = False
+        self._context_pct: Optional[float] = None
         self._activity_timer = QTimer()
         self._activity_timer.setInterval(ACTIVITY_POLL_MS)
         self._activity_timer.timeout.connect(self._check_activity)
@@ -238,6 +288,7 @@ class ClawdApp:
         self._restore_position()
         self.pet.enable_wander(self.wander)          # F5 (opt-in)
         self.pet.set_click_through(self.click_through)   # F8 (opt-in)
+        self.pet.enable_cursor_chase(self.cursor_chase)  # Y (opt-in)
 
     # -------------------------------------------------- lifecycle
 
@@ -354,6 +405,23 @@ class ClawdApp:
             act_perm.triggered.connect(self.enable_permission_bubble)
         menu.addAction(act_perm)
 
+        if statusline_registered(CLAUDE_SETTINGS_FILE):
+            act_sline = QAction(tr("menu_statusline_off"), menu)
+            act_sline.triggered.connect(self.disable_statusline)
+        else:
+            act_sline = QAction(tr("menu_statusline_on"), menu)
+            act_sline.triggered.connect(self.enable_statusline)
+        menu.addAction(act_sline)
+
+        if codex_available():
+            if codex_notify_registered():
+                act_cdx = QAction(tr("menu_codex_notify_off"), menu)
+                act_cdx.triggered.connect(self.disable_codex_notify)
+            else:
+                act_cdx = QAction(tr("menu_codex_notify_on"), menu)
+                act_cdx.triggered.connect(self.enable_codex_notify)
+            menu.addAction(act_cdx)
+
         act_cal = QAction(tr("menu_cal"), menu)
         act_cal.triggered.connect(self.calibrate)
         menu.addAction(act_cal)
@@ -395,6 +463,12 @@ class ClawdApp:
         act_click.triggered.connect(self.toggle_click_through)
         menu.addAction(act_click)
 
+        act_chase = QAction(tr("menu_chase"), menu)     # Y: oneko mode
+        act_chase.setCheckable(True)
+        act_chase.setChecked(self.cursor_chase)
+        act_chase.triggered.connect(self.toggle_cursor_chase)
+        menu.addAction(act_chase)
+
         size_menu = menu.addMenu(tr("menu_size"))    # F2: S / M / L presets
         size_group = QActionGroup(size_menu)
         size_group.setExclusive(True)
@@ -410,6 +484,9 @@ class ClawdApp:
         act_sprites = QAction(tr("menu_sprites_choose"), menu)   # F13
         act_sprites.triggered.connect(self.choose_sprite_dir)
         menu.addAction(act_sprites)
+        act_pack = QAction(tr("menu_pack_import"), menu)   # Y: petdex import
+        act_pack.triggered.connect(self.import_pack_dialog)
+        menu.addAction(act_pack)
         if self.sprite_dir is not None:
             act_spr_reset = QAction(tr("menu_sprites_reset"), menu)
             act_spr_reset.triggered.connect(self.reset_sprite_dir)
@@ -470,15 +547,12 @@ class ClawdApp:
             snap.burn_eta = burn_eta(samples)
             self._notify_transition(snap.source, snap.pct)
             self.history.add(now, snap.pct)
-        cal = auto_calibration()          # persist budgets learned from live syncs
-        if cal["budget_5h"]:
-            self.settings.setValue("auto_budget_5h", cal["budget_5h"])
-        if cal["weekly_budget"]:
-            self.settings.setValue("weekly_budget_all", cal["weekly_budget"])
-        if cal["anchor"] is not None:
-            self.settings.setValue("weekly_anchor", cal["anchor"].isoformat())
-        if cal["models"]:
-            self.settings.setValue("weekly_budget_models", json.dumps(cal["models"]))
+        sick = bool(getattr(snap, "anthropic_sick", False))
+        if sick != self._was_sick:
+            self._was_sick = sick
+            self.panel.set_incident(sick)
+            if sick and not self.dnd and not self.quiet and self.pet.isVisible():
+                self.bubble.show_text(tr("bubble_incident"), self.pet, 8000)
         self.pet.set_snapshot(snap)
         self.panel.set_history(self.history.series())
         self.panel.update_snapshot(snap)
@@ -561,6 +635,7 @@ class ClawdApp:
         prev = self._last_activity
         self._last_activity = act
         self.pet.set_activity(act)
+        self.pet.set_generating(bool(act and act[0] == "working"))
         if act == prev or self.quiet or self.dnd or not self.pet.isVisible():
             return
         if act and act[0] == "working" and act[1]:
@@ -580,8 +655,14 @@ class ClawdApp:
             if event is None:
                 continue
             query = event.get("clawd_permission")
+            status = event.get("clawd_statusline")
+            codex_turn = event.get("codex_turn")
             if isinstance(query, dict):
                 self._handle_permission_query(query, host, port)
+            elif isinstance(status, dict):
+                self._handle_statusline(status)
+            elif isinstance(codex_turn, dict):
+                self._handle_codex_turn(codex_turn)
             else:
                 self._handle_hook_event(event)
 
@@ -617,6 +698,7 @@ class ClawdApp:
     def _handle_hook_event(self, event: dict):
         name = event.get("hook_event_name") or ""
         act = None
+        clear_act = False       # explicit "back to idle" (act stays None)
         text = None
         if name == "PreToolUse":
             act = ("working", event.get("tool_name"))
@@ -627,17 +709,56 @@ class ClawdApp:
             self._fire_alert(tr("notify_input_title"), tr("notify_input_text"))
         elif name in ("Stop", "TaskCompleted"):
             act = ("waiting", None)
-        elif name == "PostToolUseFailure":
-            act = ("error", None)
+            self._subagent_count = 0
+            self._compacting = False
+        elif name in ("SubagentStart", "SubagentStop"):
+            # X2: while subagents run, Clawd juggles them ("Task" maps to the
+            # juggle mood via moods.TOOL_MOODS); the count never goes below 0
+            if name == "SubagentStart":
+                self._subagent_count += 1
+            else:
+                self._subagent_count = max(0, self._subagent_count - 1)
+            if self._subagent_count > 0:
+                act = ("working", "Task")
+            else:
+                clear_act = True
+        elif name in ("PostToolUseFailure", "StopFailure"):
+            # X2: a failure startles the pet — no toast (too noisy), and under
+            # do-not-disturb nothing happens at all
+            if self.dnd:
+                return
+            self.pet._startle()          # 30 s cooldown handled by the pet
+            act = ("error", None)        # brief grumpy/panic look
             QTimer.singleShot(5000, self._clear_error_state)
+        elif name == "PreCompact":
+            # X2: sweeping up while Claude Code compacts the context
+            self._compacting = True
+            act = ("working", "Compact")
+            text = tr("bubble_compact")
+        elif name == "PostCompact":
+            self._compacting = False
+            if self._subagent_count > 0:
+                act = ("working", "Task")   # subagents still running -> juggle
+            else:
+                clear_act = True
         elif name == "SessionStart":
+            self._subagent_count = 0
+            self._compacting = False
             text = tr("bubble_session")
+        elif name == "SessionEnd":
+            # X2: session gone — clear any hook-driven activity state (like
+            # Stop does) and release the mood hold for other live sessions
+            self._subagent_count = 0
+            self._compacting = False
+            clear_act = True
         else:
-            return
-        self._hook_hold_until = time.monotonic() + 15.0
-        if act is not None:
+            return                       # unknown/old events: ignore gracefully
+        self._hook_hold_until = (0.0 if name == "SessionEnd"
+                                 else time.monotonic() + 15.0)
+        if act is not None or clear_act:
             self._last_activity = act
             self.pet.set_activity(act)
+            self.pet.set_generating(bool(act and act[0] == "working"))
         if text and not self.quiet and not self.dnd and self.pet.isVisible():
             # a "needs you" bubble jumps to the terminal when clicked
             self.bubble.show_text(
@@ -648,6 +769,7 @@ class ClawdApp:
         if self.pet._activity and self.pet._activity[0] == "error":
             self._last_activity = None
             self.pet.set_activity(None)
+            self.pet.set_generating(False)
 
     def toggle_quiet(self):
         self.quiet = not self.quiet
@@ -681,7 +803,9 @@ class ClawdApp:
             return
         self._last_alert_mono = now
         self._last_toast_was_update = False
-        self.tray.showMessage(title, text, QSystemTrayIcon.Information, 7000)
+        # native first: Qt's fallback balloon steals focus on macOS
+        if not post_notification(title, text):
+            self.tray.showMessage(title, text, QSystemTrayIcon.Information, 7000)
         # F9: real chime when available; beep stays the offscreen/CI fallback
         if self.notify_sound and not sounds.play("attention"):
             QApplication.beep()
@@ -700,6 +824,11 @@ class ClawdApp:
         self.settings.setValue("wander", self.wander)
         self.pet.enable_wander(self.wander)
         self._rebuild_tray_menu()
+
+    def toggle_cursor_chase(self):
+        self.cursor_chase = not self.cursor_chase
+        self.settings.setValue("cursor_chase", self.cursor_chase)
+        self.pet.enable_cursor_chase(self.cursor_chase)
 
     def toggle_click_through(self):
         self.click_through = not self.click_through
@@ -738,6 +867,18 @@ class ClawdApp:
         if not self._set_sprite_dir(Path(chosen)):
             QMessageBox.warning(None, tr("sprites_invalid_title"),
                                 tr("sprites_invalid_text"))
+
+    def import_pack_dialog(self):
+        """Import a petdex/'Codex pet' community pack (.zip or folder)."""
+        chosen, _ = QFileDialog.getOpenFileName(
+            None, tr("menu_pack_import"), "",
+            "Sprite-Pack (*.zip);;Alle Dateien (*)")
+        if not chosen:
+            return
+        dest = import_sprite_pack(Path(chosen))
+        if dest is None or not self._set_sprite_dir(dest):
+            QMessageBox.warning(None, tr("sprites_invalid_title"),
+                                tr("pack_invalid_text"))
 
     def _set_sprite_dir(self, path: Path) -> bool:
         """Activate a sprite pack; False (setting untouched) when invalid."""
@@ -806,14 +947,18 @@ class ClawdApp:
         prev = self._prev_pct.get(source)
         self._prev_pct[source] = pct
         kind = notify_decision(prev, pct)
+        if kind == "reset" and not self.dnd:
+            self.pet.celebrate()          # quota refreshed — party hop (Y)
         if (kind is None or self.tray is None or not self.notify_enabled
                 or self.dnd):
             return
         icon = (QSystemTrayIcon.Information if kind == "reset"
                 else QSystemTrayIcon.Warning)
         self._last_toast_was_update = False   # this balloon is not the update one
-        self.tray.showMessage(tr(f"notify_{kind}_title"),
-                              tr(f"notify_{kind}_text"), icon, 6000)
+        if not post_notification(tr(f"notify_{kind}_title"),
+                                 tr(f"notify_{kind}_text")):
+            self.tray.showMessage(tr(f"notify_{kind}_title"),
+                                  tr(f"notify_{kind}_text"), icon, 6000)
 
     def enable_hooks(self):
         command = hook_command()
@@ -855,6 +1000,71 @@ class ClawdApp:
     def disable_permission_bubble(self):
         unregister_permission_hook(CLAUDE_SETTINGS_FILE)
         self.perm_bubble.decide("pass")
+        self._rebuild_tray_menu()
+
+    # ------------------------------------------- statusline (X2)
+
+    def enable_statusline(self):
+        command = hook_command("clawd_statusline.py")
+        if not command:
+            QMessageBox.warning(
+                None, tr("hooks_py_title"), tr("hooks_py_text"))
+            return
+        if register_statusline(CLAUDE_SETTINGS_FILE, command):
+            QMessageBox.information(
+                None, tr("statusline_on_title"),
+                tr("statusline_on_text",
+                   f=f"{CLAUDE_SETTINGS_FILE.name}.clawd-bak"))
+        elif not statusline_registered(CLAUDE_SETTINGS_FILE):
+            # a statusline the user configured themselves — never overwritten
+            QMessageBox.warning(
+                None, tr("statusline_foreign_title"),
+                tr("statusline_foreign_text"))
+        self._rebuild_tray_menu()
+
+    def disable_statusline(self):
+        unregister_statusline(CLAUDE_SETTINGS_FILE)
+        self._rebuild_tray_menu()
+
+    def _handle_statusline(self, payload: dict):
+        """Latest context-window fill from clawd_statusline.py via UDP."""
+        try:
+            pct = float(payload.get("context_pct"))
+        except (TypeError, ValueError):
+            return
+        pct = max(0.0, min(100.0, pct))
+        model = payload.get("model")
+        model = model.strip() if isinstance(model, str) and model.strip() else None
+        self._context_pct = pct
+        self.panel.set_context(pct, model)
+
+    # -------------------------------------------------- Codex (X1)
+
+    def _handle_codex_turn(self, payload: dict):
+        """codex_notify.py forwarded an agent-turn-complete event: same
+        'your turn' treatment as a finished Claude turn, Codex-labeled."""
+        if self.dnd or not self.notify_enabled:
+            return
+        self._fire_alert(tr("notify_codex_title"), tr("notify_codex_text"))
+        if self.pet.isVisible() and not self.quiet:
+            self.bubble.show_text(tr("notify_codex_text"), self.pet,
+                                  on_click=focus_terminal)
+
+    def enable_codex_notify(self):
+        from .hooks import _hook_runner
+        runner = _hook_runner()
+        script = Path(__file__).resolve().parent.parent / "codex_notify.py"
+        if not runner or not script.is_file():
+            return
+        line = codex_notify_command(runner, script)
+        if not register_notify(line):
+            if not codex_notify_registered():   # a foreign entry blocked us
+                QMessageBox.information(None, "Codex",
+                                        tr("codex_notify_foreign"))
+        self._rebuild_tray_menu()
+
+    def disable_codex_notify(self):
+        unregister_notify()
         self._rebuild_tray_menu()
 
     # -------------------------------------------------- calibration

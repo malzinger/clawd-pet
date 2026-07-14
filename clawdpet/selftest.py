@@ -1711,6 +1711,61 @@ def run_selftest() -> int:
     pet.set_pct(10)                                   # restore chill for later blocks
     print("[selftest] session anchor + pairing guard OK")
 
+    # --- token rotation: per-source 429 pause + read-only CC token --------
+    from clawdpet.api import _claude_code_token, fetch_api_usage
+    creds_backup = api_mod.CREDENTIALS_FILE
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            cf = Path(td) / "creds.json"
+            api_mod.CREDENTIALS_FILE = cf
+            good_ms = int(time.time() * 1000 + 3600_000)
+            cf.write_text(json.dumps({"claudeAiOauth": {
+                "accessToken": "cc-tok", "expiresAt": good_ms}}))
+            if sys.platform != "darwin":
+                assert _claude_code_token() == "cc-tok"
+            else:
+                assert _claude_code_token() == "cc-tok"   # file wins, no keychain
+            cf.write_text(json.dumps({"claudeAiOauth": {
+                "accessToken": "cc-old", "expiresAt": 1}}))
+            assert _claude_code_token() is None            # expired -> unusable
+    finally:
+        api_mod.CREDENTIALS_FILE = creds_backup
+    rot_backup = (api_mod._clawd_own_token, api_mod._claude_code_token,
+                  api_mod._fetch_usage_with, dict(api_mod._source_pause),
+                  os.environ.pop("CLAWD_NO_API", None))
+    try:
+        api_mod._source_pause.clear()
+        api_mod._clawd_own_token = lambda: "own-tok"
+        api_mod._claude_code_token = lambda: "cc-tok"
+        calls = []
+        def fake_fetch(token):
+            calls.append(token)
+            if token == "own-tok":
+                return None, "429", 1200.0                # own token locked out
+            return {"limits": [{"kind": "session", "percent": 72.0,
+                                "resets_at": None}]}, None, None
+        api_mod._fetch_usage_with = fake_fetch
+        got = fetch_api_usage()
+        assert got and got[0].pct == 72.0, "rotation must fall back to CC token"
+        assert calls == ["own-tok", "cc-tok"]
+        assert api_mod._source_pause.get("own", 0) > time.time() + 600
+        calls.clear()
+        got = fetch_api_usage()                            # own still paused
+        assert got and calls == ["cc-tok"], "paused source must be skipped"
+        api_mod._fetch_usage_with = lambda tok: (None, "429", 60.0)
+        api_mod._source_pause.clear()
+        assert fetch_api_usage() is None                   # all limited -> None
+        assert api_mod._fetch_fail["kind"] == "429"
+    finally:
+        (api_mod._clawd_own_token, api_mod._claude_code_token,
+         api_mod._fetch_usage_with, pause_prev, env_prev) = rot_backup
+        api_mod._source_pause.clear()
+        api_mod._source_pause.update(pause_prev)
+        if env_prev is not None:
+            os.environ["CLAWD_NO_API"] = env_prev
+        api_mod._fetch_fail.update(kind=None, retry_after=None)
+    print("[selftest] token rotation OK")
+
     print("[selftest] OK")
     del app
     return 0

@@ -8,6 +8,8 @@ import hashlib
 import json
 import os
 import secrets
+import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -135,25 +137,45 @@ def _clawd_own_token(path: Path = CLAWD_AUTH_FILE) -> Optional[str]:
     return _refresh_clawd_token(auth, path)   # expired — safe self-refresh of our own token
 
 
-def _get_access_token() -> Optional[str]:
-    """Prefer Clawd's own independent token (auto-refreshed); otherwise fall back
-    to the token Claude Code stored, READ-ONLY (never refreshed or written, so a
-    rotation we could not persist can never lock the user out of Claude Code)."""
-    if os.environ.get("CLAWD_NO_API"):
-        return None
-    own = _clawd_own_token()
-    if own:
-        return own
+def _claude_code_token() -> Optional[str]:
+    """The token Claude Code itself stored, strictly READ-ONLY.
+
+    Never refreshed and never written back — a failed write-back of Claude
+    Code's rotating login could lock the user out of Claude Code. On
+    Windows/Linux it lives in ~/.claude/.credentials.json; on macOS Claude
+    Code keeps it in the login keychain instead, read via `security`."""
+    creds = None
     try:
         creds = json.loads(CREDENTIALS_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        pass
+    if creds is None and sys.platform == "darwin":
+        try:
+            proc = subprocess.run(
+                ["security", "find-generic-password",
+                 "-s", "Claude Code-credentials", "-w"],
+                capture_output=True, text=True, timeout=10)
+            if proc.returncode == 0:
+                creds = json.loads(proc.stdout)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            creds = None
+    if not isinstance(creds, dict):
         return None
     oauth = creds.get("claudeAiOauth") or {}
     token = oauth.get("accessToken")
     expires_ms = oauth.get("expiresAt") or 0
     if token and time.time() * 1000 < expires_ms - 60_000:
         return token
-    return None                   # both expired — fall back to the log estimate
+    return None
+
+
+def _get_access_token() -> Optional[str]:
+    """Prefer Clawd's own independent token (auto-refreshed); otherwise fall back
+    to the token Claude Code stored, READ-ONLY (never refreshed or written, so a
+    rotation we could not persist can never lock the user out of Claude Code)."""
+    if os.environ.get("CLAWD_NO_API"):
+        return None
+    return _clawd_own_token() or _claude_code_token()
 
 
 def clawd_build_authorize_url():
@@ -242,12 +264,11 @@ def _failure_backoff(fails: int) -> float:
     return min(API_MAX_BACKOFF_S, API_RETRY_S * 2 ** (fails - 1))
 
 
-def fetch_api_usage() -> Optional[list]:
-    """Real utilization buckets straight from Anthropic, or None on failure."""
-    token = _get_access_token()
-    if not token:
-        _fetch_fail.update(kind="no_token", retry_after=None)
-        return None
+_source_pause = {}     # token source name -> time.time() until it rests (429)
+
+
+def _fetch_usage_with(token: str):
+    """One usage request. Returns (data, err_kind, retry_after_s)."""
     req = urllib.request.Request(USAGE_URL, headers={
         "Authorization": f"Bearer {token}",
         "anthropic-beta": "oauth-2025-04-20",
@@ -257,15 +278,55 @@ def fetch_api_usage() -> Optional[list]:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.load(resp)
     except urllib.error.HTTPError as e:
-        _fetch_fail.update(kind="429" if e.code == 429 else "http",
-                           retry_after=_parse_retry_after(e))
-        return None
+        return None, ("429" if e.code == 429 else "http"), _parse_retry_after(e)
     except (urllib.error.URLError, OSError, ValueError):
-        _fetch_fail.update(kind="net", retry_after=None)
+        return None, "net", None
+    return (data if isinstance(data, dict) else None), None, None
+
+
+def fetch_api_usage() -> Optional[list]:
+    """Real utilization buckets straight from Anthropic, or None on failure.
+
+    The endpoint rate-limits PER TOKEN (verified live: Clawd's own token was
+    locked out for an hour while Claude Code's token answered fine), so both
+    tokens are candidates: Clawd's own grant first, then Claude Code's token
+    read-only. A 429 pauses only that token; the other one carries on.
+    """
+    if os.environ.get("CLAWD_NO_API"):
+        _fetch_fail.update(kind="no_token", retry_after=None)
         return None
-    _fetch_fail.update(kind=None, retry_after=None)
-    if not isinstance(data, dict):
+    candidates = []
+    own = _clawd_own_token()
+    if own:
+        candidates.append(("own", own))
+    cc = _claude_code_token()
+    if cc and cc != own:
+        candidates.append(("claude-code", cc))
+    if not candidates:
+        _fetch_fail.update(kind="no_token", retry_after=None)
         return None
+    now = time.time()
+    last_kind, last_ra = None, None
+    for source, token in candidates:
+        if now < _source_pause.get(source, 0.0):
+            if last_kind is None:      # every skipped source counts as limited
+                last_kind = "429"
+                last_ra = _source_pause[source] - now
+            continue
+        data, kind, ra = _fetch_usage_with(token)
+        if data is not None:
+            _fetch_fail.update(kind=None, retry_after=None)
+            return _parse_usage_buckets(data)
+        last_kind, last_ra = kind, ra
+        if kind == "429":
+            _source_pause[source] = now + max(ra or 0.0, RATE_LIMIT_BASE_S)
+            continue                   # this token rests; the next one may work
+        break                          # network/server error — rotation won't help
+    _fetch_fail.update(kind=last_kind or "net", retry_after=last_ra)
+    return None
+
+
+def _parse_usage_buckets(data: dict) -> Optional[list]:
     buckets = []
 
     # Preferred source: the "limits" array — it is what Claude's own usage

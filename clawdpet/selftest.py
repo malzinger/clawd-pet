@@ -2108,6 +2108,60 @@ def run_selftest() -> int:
          progress_mod._xp, progress_mod._state_mtime) = st_bk
     print("[selftest] motion gates + visible progress OK")
 
+    # --- Q: quips ---
+    import random as _q_random
+    from .config import QUIP_JITTER_S, QUIP_MIN_INTERVAL_S
+    from .quips import (QUIP_RULES, QuipContext, QuipScheduler, choose_quip,
+                        template_values)
+    assert QUIP_MIN_INTERVAL_S == 600.0 and QUIP_JITTER_S == 300.0
+    _q_rules = {r.name: r for r in QUIP_RULES}
+    assert len(_q_rules) == len(QUIP_RULES), "duplicate rule names"
+    # a rich context that satisfies every rule at once
+    _q_rich = QuipContext(hour=2, pct=91.0, level=12, title="Reef Architect",
+                          codex_active=True, session_minutes=245.0,
+                          tool_counts={"Bash": 42, "Edit": 30}, weekday=6)
+    _q_vals = template_values(_q_rich)
+    for _q_rule in QUIP_RULES:
+        for _q_lang in ("de", "en"):
+            _q_tmpls = _q_rule.templates.get(_q_lang)
+            assert _q_tmpls, f"rule {_q_rule.name} lacks {_q_lang} templates"
+            for _q_t in _q_tmpls:
+                _q_t.format(**_q_vals)      # placeholders must be satisfiable
+    # deterministic pick with a seeded rng
+    assert (choose_quip(_q_rich, "en", _q_random.Random(7))
+            == choose_quip(_q_rich, "en", _q_random.Random(7)))
+    # late-night rule fires at hour 2, not at 14
+    _q_ln = _q_rules["late_night"]
+    assert _q_ln.predicate(QuipContext(hour=2))
+    assert not _q_ln.predicate(QuipContext(hour=14))
+    # neutral defaults: an empty context matches only the fallback
+    _q_fb_de = set(_q_rules["smalltalk"].templates["de"])
+    for _q_seed in range(20):
+        _q_pick = choose_quip(QuipContext(), "de", _q_random.Random(_q_seed))
+        assert _q_pick in _q_fb_de, "empty ctx must draw from smalltalk"
+    # non-fallback preferred: hour=2 alone must never yield smalltalk
+    _q_ln_all = {t.format(**template_values(QuipContext(hour=2)))
+                 for t in _q_ln.templates["de"]}
+    for _q_seed in range(20):
+        _q_pick = choose_quip(QuipContext(hour=2), "de",
+                              _q_random.Random(_q_seed))
+        assert _q_pick in _q_ln_all and _q_pick not in _q_fb_de, \
+            "specific rule must beat the fallback"
+    assert choose_quip(_q_rich, "en", _q_random.Random(1)) is not None
+    # scheduler: min interval + jitter, driven manually (no sleeping)
+    _q_sched = QuipScheduler(_q_random.Random(42))
+    assert _q_sched.should_fire(0.0), "fresh scheduler must be free to fire"
+    _q_sched.mark_fired(100.0)
+    assert not _q_sched.should_fire(100.0 + QUIP_MIN_INTERVAL_S - 1.0), \
+        "must stay quiet inside the min interval"
+    _q_wait = _q_sched._next_at - 100.0
+    assert QUIP_MIN_INTERVAL_S <= _q_wait <= QUIP_MIN_INTERVAL_S + QUIP_JITTER_S
+    assert _q_sched.should_fire(100.0 + QUIP_MIN_INTERVAL_S + QUIP_JITTER_S), \
+        "must fire once interval + max jitter passed"
+    _q_sched.mark_fired(2000.0)
+    assert not _q_sched.should_fire(2000.0 + QUIP_MIN_INTERVAL_S - 1.0)
+    print("[selftest] quips OK")
+
     print("[selftest] OK")
     del app
     return 0

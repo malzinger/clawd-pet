@@ -218,3 +218,11 @@ CODEX_RETRY_S = 600.0          # after a failure wait even longer
 WINDOW_SIT_POLL_MS = 500    # frontmost-window poll cadence while enabled
 WINDOW_SIT_MIN_W = 200      # ignore windows narrower than this (palettes etc.)
 WINDOW_SIT_MIN_H = 100      # ignore windows flatter than this (toolbars etc.)
+
+# --- Q: quips ---
+# Personality one-liners (quips.py): a quip may fire at most every
+# QUIP_MIN_INTERVAL_S seconds, plus a random 0..QUIP_JITTER_S so the pet
+# never quips on a metronome. The app owns the timer; the scheduler only
+# answers should_fire().
+QUIP_MIN_INTERVAL_S = 600.0
+QUIP_JITTER_S = 300.0

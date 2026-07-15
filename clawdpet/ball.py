@@ -113,7 +113,10 @@ class BallWidget(QWidget):
                 cx = rx * px + px / 2 - BALL_SIZE / 2
                 cy = ry * px + px / 2 - BALL_SIZE / 2
                 if cx * cx + cy * cy <= (BALL_SIZE / 2 - 1) ** 2:
+                    # light patch top-left so it reads as a ball, not a dot
+                    lx = cx + BALL_SIZE * 0.18
+                    ly = cy + BALL_SIZE * 0.18
                     p.fillRect(rx * px, ry * px, px, px,
-                               patch if (rx + ry) < BALL_SIZE // px // 2
-                               else body)
+                               patch if lx * lx + ly * ly
+                               <= (BALL_SIZE * 0.22) ** 2 else body)
         p.end()

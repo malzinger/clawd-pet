@@ -12,7 +12,7 @@ from PyQt5.QtGui import QColor, QCursor, QGuiApplication, QPainter, QPixmap, QRe
 from PyQt5.QtWidgets import QWidget
 
 from . import macwindows
-from .art import ArtState, ClawdArt, SpriteSet
+from .art import ArtState, ClawdArt, SpriteSet, _alpha_bbox
 from .hats import anchor_for, hat_pixmap
 from .config import (
     CELEBRATE_HOP_V,
@@ -161,6 +161,7 @@ class PetWidget(QWidget):
         self._generating = False       # Claude is generating -> typing-along bob
         self._celebrating = False
         self._hat = "none"             # H: current hat key (drawn in _blit)
+        self._hat_bbox_cache = {}      # frame cacheKey -> visible-content bbox
 
         # ball fetch (inline wave): walk to a landed ball and collect it
         self._fetch_ball = None
@@ -500,15 +501,41 @@ class PetWidget(QWidget):
             self._hat = key
             self.update()
 
+    def _frame_bbox(self, pm: QPixmap):
+        """Visible-content box of a frame, cached per frame.
+
+        Hats must anchor to the BODY, not the frame rectangle — gif frames
+        carry transparent padding that varies per mood and bobs during the
+        animation, so a frame-anchored hat floats or slides into the face
+        (user report: sunglasses mispositioned)."""
+        key = pm.cacheKey()
+        box = self._hat_bbox_cache.get(key)
+        if box is None:
+            box = _alpha_bbox(pm.toImage())
+            if box.isNull():
+                box = pm.rect()
+            if len(self._hat_bbox_cache) > 256:
+                self._hat_bbox_cache.clear()      # sprite pack swapped
+            self._hat_bbox_cache[key] = box
+        return box
+
     def _draw_hat(self, p: QPainter, x: int, y: int, pm: QPixmap):
-        hat = hat_pixmap(self._hat, pm.width())
+        if self._hat in ("", "none"):
+            return
+        box = self._frame_bbox(pm)
+        hat = hat_pixmap(self._hat, box.width())
         if hat is None:
             return
-        hx = x + (pm.width() - hat.width()) // 2
+        hx = x + box.left() + (box.width() - hat.width()) // 2
         if anchor_for(self._hat) == "eyes":
-            hy = y + int(pm.height() * 0.22)     # across the eye line
+            # eye line sits high in a compact body; poses with raised claws
+            # (jump/juggle) stretch the bbox upward, so their eyes sit deeper
+            frac = {"happy": 0.34, "pet": 0.34,
+                    "juggle": 0.30, "conduct": 0.30}.get(self.mood, 0.22)
+            hy = (y + box.top() + int(box.height() * frac)
+                  - hat.height() // 2)
         else:
-            hy = y - hat.height() * 2 // 3       # sits on top, brim overlaps
+            hy = y + box.top() - hat.height() * 2 // 3   # brim overlaps head
         p.drawPixmap(hx, max(0, hy), hat)
 
     def _blit(self, p: QPainter, pm: QPixmap, opacity: float):

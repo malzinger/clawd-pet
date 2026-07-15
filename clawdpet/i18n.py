@@ -252,6 +252,18 @@ STRINGS = {
         "progress_line": "Level {n} · {title} · {xp} XP (nächstes: {nxt})",
         # --- W: window sitting ---
         "menu_window_sit": "Auf Fenstern sitzen",
+        # --- H: hats ---
+        "menu_hat": "Hut",
+        "hat_none": "Ohne",
+        "hat_party": "Partyhut",
+        "hat_hardhat": "Bauhelm",
+        "hat_beret": "Barett",
+        "hat_pirate": "Piratenhut",
+        "hat_wizard": "Zauberhut",
+        "hat_crown": "Krone",
+        "hat_santa": "Weihnachtsmütze",
+        "hat_sunglasses": "Sonnenbrille",
+        "hat_locked": "ab Level {n}",
     },
     "en": {
         "panel_title": "Plan usage limits · {plan}",
@@ -432,6 +444,18 @@ STRINGS = {
         "progress_line": "Level {n} · {title} · {xp} XP (next: {nxt})",
         # --- W: window sitting ---
         "menu_window_sit": "Sit on windows",
+        # --- H: hats ---
+        "menu_hat": "Hat",
+        "hat_none": "None",
+        "hat_party": "Party hat",
+        "hat_hardhat": "Hard hat",
+        "hat_beret": "Beret",
+        "hat_pirate": "Pirate hat",
+        "hat_wizard": "Wizard hat",
+        "hat_crown": "Crown",
+        "hat_santa": "Santa hat",
+        "hat_sunglasses": "Sunglasses",
+        "hat_locked": "from level {n}",
     },
 }
 

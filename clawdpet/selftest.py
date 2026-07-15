@@ -2411,6 +2411,19 @@ def run_selftest() -> int:
     finally:
         (progress_mod.STATE_FILE, progress_mod._state_loaded,
          progress_mod._xp, progress_mod._state_mtime) = st_bk2
+    # regression guard for the INIT-ORDER bug class (pet_size, then mischief):
+    # every attribute the menu reads must exist BEFORE _setup_tray would run —
+    # simulate the mid-init menu build on a half-constructed instance
+    half = ClawdApp.__new__(ClawdApp)
+    import inspect as _inspect
+    src_init = _inspect.getsource(ClawdApp.__init__)
+    tray_pos = src_init.index("._setup_tray()")
+    for attr in ("mischief", "hat", "window_sit", "cursor_chase", "wander",
+                 "click_through", "pet_size", "check_updates", "dnd",
+                 "notify_enabled", "notify_sound", "quiet"):
+        assert ("self." + attr + " = ") in src_init[:tray_pos], \
+            "menu-read attribute set only AFTER _setup_tray: " + attr
+    del half
     print("[selftest] fancy-wave integration OK")
 
     print("[selftest] OK")

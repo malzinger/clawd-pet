@@ -218,3 +218,10 @@ CODEX_RETRY_S = 600.0          # after a failure wait even longer
 WINDOW_SIT_POLL_MS = 500    # frontmost-window poll cadence while enabled
 WINDOW_SIT_MIN_W = 200      # ignore windows narrower than this (palettes etc.)
 WINDOW_SIT_MIN_H = 100      # ignore windows flatter than this (toolbars etc.)
+
+# --- M: mini pets ---
+# One small crab per running subagent (clawdpet/minipets.py). Minis reuse the
+# idle sprite at a fraction of the main pet's height and are hard-capped so a
+# subagent swarm cannot flood the desktop with windows/timers.
+MINIPET_MAX = 5               # never show more mini crabs than this
+MINIPET_HEIGHT_FACTOR = 0.45  # mini height = PET_HEIGHT * this factor

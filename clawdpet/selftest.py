@@ -2108,6 +2108,311 @@ def run_selftest() -> int:
          progress_mod._xp, progress_mod._state_mtime) = st_bk
     print("[selftest] motion gates + visible progress OK")
 
+    # --- inline wave: ball fetch, shell drops, mischief --------------------
+    from clawdpet.ball import BallWidget
+    from clawdpet.shells import ShellScheduler, ShellWidget
+    from clawdpet.config import SHELL_XP_RANGE
+    ball = BallWidget()
+    avail_b = pet._screen_avail()
+    ball.launch(avail_b.center().x(), avail_b.top() + 40, 220.0, 0.0)
+    for _ in range(3000):
+        if not ball.step(0.033, avail_b):
+            break
+    assert ball.landed, "ball must come to rest"
+    assert ball.y() >= avail_b.bottom() - ball.height() - 2, "ball rests on floor"
+    # fetch: pet walks to the landed ball and collects it
+    pet.move(avail_b.left() + 10, avail_b.bottom() - pet.height())
+    ball.move(pet.x() + 300, ball.y())
+    fetched = []
+    pet.on_fetch_done = lambda: fetched.append(1)
+    pet.set_activity(None)
+    pet.fetch(ball)
+    assert pet.fetching
+    for _ in range(400):
+        pet._fetch_tick()
+        if not pet.fetching:
+            break
+    assert fetched == [1], "fetch callback must fire exactly once"
+    assert not pet.fetching
+    pet._stop_throw()                                 # cancel the happy hop
+    pet._end_reaction()
+    pet.on_fetch_done = None
+    print("[selftest] ball fetch OK")
+
+    got_xp = []
+    shell = ShellWidget(got_xp.append)
+    shell.appear(avail_b.left() + 50, avail_b.bottom() - 60)
+    class _FakeEv:
+        def button(self):
+            from PyQt5.QtCore import Qt as _Qt
+            return _Qt.LeftButton
+        def accept(self):
+            pass
+    shell.mousePressEvent(_FakeEv())
+    shell.mousePressEvent(_FakeEv())                  # double click safe
+    assert len(got_xp) == 1 and SHELL_XP_RANGE[0] <= got_xp[0] <= SHELL_XP_RANGE[1]
+    import random as _rnd
+    sched = ShellScheduler(_rnd.Random(7))
+    t0 = 1000.0
+    sched.arm(t0)
+    assert not sched.should_spawn(t0 + 1, pending=False, working=True)
+    assert not sched.should_spawn(t0 + 99999, pending=True, working=True)
+    assert not sched.should_spawn(t0 + 99999, pending=False, working=False)
+    assert sched.should_spawn(t0 + 99999, pending=False, working=True)
+    assert not sched.should_spawn(t0 + 99999 + 1, pending=False, working=True)
+    print("[selftest] shell drops OK")
+
+    from PyQt5.QtCore import QPoint as _QP
+    pet.enable_mischief(True)
+    pet._mischief_next = 0.0                          # due immediately
+    tgt = _QP(500, 500)
+    pet._mischief_tick(1000.0, tgt)                   # first sighting arms rest-clock
+    assert not pet._mischief_armed
+    pet._cursor_still_since = 900.0                   # rested long enough
+    pet._mischief_tick(1000.0, tgt)
+    assert pet._mischief_armed, "due + resting cursor must arm the pinch"
+    pet._mischief_pinch(1000.0, tgt)
+    assert not pet._mischief_armed and pet._mischief_next > 1000.0
+    pet._stop_throw()
+    pet._end_reaction()
+    pet.enable_mischief(False)
+    print("[selftest] mischief OK")
+    # --- H: hats ---
+    from datetime import date as _h_date
+
+    from .hats import (
+        HATS,
+        anchor_for,
+        hat_available,
+        hat_pixmap,
+        season_default,
+        unlocked_hats,
+    )
+    from .i18n import STRINGS as _h_strings
+
+    # every hat definition has a label in BOTH languages, plus the menu keys
+    for _h_key, _h_def in HATS.items():
+        for _h_lang in ("de", "en"):
+            assert _h_def["label_key"] in _h_strings[_h_lang], (_h_key, _h_lang)
+    for _h_lang in ("de", "en"):
+        assert "menu_hat" in _h_strings[_h_lang], _h_lang
+        assert "hat_locked" in _h_strings[_h_lang], _h_lang
+        assert "{n}" in _h_strings[_h_lang]["hat_locked"], _h_lang
+
+    # pixmap generation: non-null with alpha for every drawable key, never raises
+    assert hat_pixmap("none", 60) is None and hat_pixmap("none", 140) is None
+    assert hat_pixmap("no-such-hat", 60) is None
+    for _h_key in HATS:
+        if _h_key == "none":
+            continue
+        for _h_w in (60, 140):
+            _h_pm = hat_pixmap(_h_key, _h_w)
+            assert _h_pm is not None and not _h_pm.isNull(), (_h_key, _h_w)
+            assert _h_pm.hasAlphaChannel(), (_h_key, _h_w)
+            # sized for the sprite: clearly narrower than the sprite itself
+            assert 0 < _h_pm.width() <= _h_w, (_h_key, _h_w, _h_pm.width())
+            # lru cache: identical args return the identical object
+            assert hat_pixmap(_h_key, _h_w) is _h_pm, (_h_key, _h_w)
+
+    # unlock thresholds: monotonic over the registry order, "none" always free
+    _h_prev = -1
+    for _h_key, _h_def in HATS.items():
+        if _h_def.get("seasonal"):
+            continue
+        assert _h_def["min_level"] >= _h_prev, "unlock thresholds not monotonic"
+        _h_prev = _h_def["min_level"]
+    assert HATS["none"]["min_level"] == 0
+    assert unlocked_hats(0) == ["none"]
+    assert unlocked_hats(4) == ["none", "party", "hardhat"]
+    assert "none" in unlocked_hats(99)
+    assert set(unlocked_hats(99)) == {
+        k for k, d in HATS.items() if not d.get("seasonal")}
+    # seasonal keys are never level rewards
+    assert "santa" not in unlocked_hats(99)
+    assert "sunglasses" not in unlocked_hats(99)
+    assert hat_available("none", 0)
+    assert not hat_available("party", 1) and hat_available("party", 2)
+    assert not hat_available("crown", 17) and hat_available("crown", 18)
+    assert not hat_available("no-such-hat", 99)
+    assert hat_available("santa", 0) and hat_available("sunglasses", 0)
+
+    # seasonal defaults are purely date-driven
+    assert season_default(_h_date(2026, 12, 1)) == "santa"
+    assert season_default(_h_date(2026, 12, 31)) == "santa"
+    assert season_default(_h_date(2026, 6, 1)) == "sunglasses"
+    assert season_default(_h_date(2026, 7, 15)) == "sunglasses"
+    assert season_default(_h_date(2026, 8, 31)) == "sunglasses"
+    assert season_default(_h_date(2026, 5, 31)) == "none"
+    assert season_default(_h_date(2026, 9, 1)) == "none"
+    assert season_default(_h_date(2026, 11, 30)) == "none"
+    assert season_default(_h_date(2026, 1, 1)) == "none"
+
+    # anchors: sunglasses overlay the eyes, everything else sits on top
+    assert anchor_for("sunglasses") == "eyes"
+    for _h_key in ("none", "party", "hardhat", "beret", "pirate",
+                   "wizard", "crown", "santa"):
+        assert anchor_for(_h_key) == "top", _h_key
+    assert anchor_for("no-such-hat") == "top"
+    print("[selftest] hats OK")
+    # --- M: mini pets ---
+    from PyQt5.QtCore import QPoint
+    from .config import MINIPET_HEIGHT_FACTOR, MINIPET_MAX, PET_HEIGHT
+    from .minipets import MiniCrab, MiniPetManager
+    avail_m = app.primaryScreen().availableGeometry()
+    anchor_m = QPoint(avail_m.center().x(), avail_m.bottom() - 4)
+    mgr_m = MiniPetManager()
+    mgr_m.set_count(3, anchor_m)
+    assert mgr_m.count() == 3 and len(mgr_m.positions()) == 3
+    crabs_m = list(mgr_m._crabs)
+    assert all(isinstance(c, MiniCrab) and c.isVisible() for c in crabs_m)
+    assert all(c.height() == int(PET_HEIGHT * MINIPET_HEIGHT_FACTOR)
+               for c in crabs_m)
+    anchors_m = {(c._anchor.x(), c._anchor.y()) for c in crabs_m}
+    assert len(anchors_m) == 3, "mini anchors must be spread apart"
+    mgr_m.set_count(1, anchor_m)               # despawn most recent first
+    assert mgr_m.count() == 1 and mgr_m._crabs[0] is crabs_m[0]
+    assert crabs_m[0]._timer.isActive()
+    assert not crabs_m[1]._timer.isActive(), "despawned crab timer must stop"
+    assert not crabs_m[2]._timer.isActive(), "despawned crab timer must stop"
+    mgr_m.clear()
+    assert mgr_m.count() == 0 and mgr_m.positions() == []
+    assert not any(c._timer.isActive() for c in crabs_m), \
+        "no orphan 60 ms timers after clear()"
+    mgr_m.set_count(99, anchor_m)              # swarm: hard cap
+    assert mgr_m.count() == MINIPET_MAX
+    mgr_m.clear()
+    assert mgr_m.count() == 0
+    crab_m = MiniCrab(anchor_m)
+    crab_m.show()
+    crab_m.stop()                              # ticks are driven manually
+    raised_m = []
+    crab_m.raise_ = lambda: raised_m.append(1)
+    crab_m._state = "walk"                     # drive the walk state directly
+    crab_m._target_x = crab_m.x() - 80         # ... heading left
+    for _ in range(30):
+        crab_m._tick()
+        assert avail_m.contains(crab_m.geometry()), "mini crab left the screen"
+    assert not raised_m, "MiniCrab must never call raise_() (focus steal)"
+    assert crab_m._facing == -1, "facing must mirror while walking left"
+    crab_m._state = "walk"
+    crab_m._target_x = crab_m.x() + 80         # walking right flips it back
+    crab_m._tick()
+    assert crab_m._facing == 1
+    crab_m.hide()                              # hiding alone must stop the timer
+    assert not crab_m._timer.isActive()
+    crab_m.deleteLater()
+    print("[selftest] mini pets OK")
+    # --- Q: quips ---
+    import random as _q_random
+    from .config import QUIP_JITTER_S, QUIP_MIN_INTERVAL_S
+    from .quips import (QUIP_RULES, QuipContext, QuipScheduler, choose_quip,
+                        template_values)
+    assert QUIP_MIN_INTERVAL_S == 600.0 and QUIP_JITTER_S == 300.0
+    _q_rules = {r.name: r for r in QUIP_RULES}
+    assert len(_q_rules) == len(QUIP_RULES), "duplicate rule names"
+    # a rich context that satisfies every rule at once
+    _q_rich = QuipContext(hour=2, pct=91.0, level=12, title="Reef Architect",
+                          codex_active=True, session_minutes=245.0,
+                          tool_counts={"Bash": 42, "Edit": 30}, weekday=6)
+    _q_vals = template_values(_q_rich)
+    for _q_rule in QUIP_RULES:
+        for _q_lang in ("de", "en"):
+            _q_tmpls = _q_rule.templates.get(_q_lang)
+            assert _q_tmpls, f"rule {_q_rule.name} lacks {_q_lang} templates"
+            for _q_t in _q_tmpls:
+                _q_t.format(**_q_vals)      # placeholders must be satisfiable
+    # deterministic pick with a seeded rng
+    assert (choose_quip(_q_rich, "en", _q_random.Random(7))
+            == choose_quip(_q_rich, "en", _q_random.Random(7)))
+    # late-night rule fires at hour 2, not at 14
+    _q_ln = _q_rules["late_night"]
+    assert _q_ln.predicate(QuipContext(hour=2))
+    assert not _q_ln.predicate(QuipContext(hour=14))
+    # neutral defaults: an empty context matches only the fallback
+    _q_fb_de = set(_q_rules["smalltalk"].templates["de"])
+    for _q_seed in range(20):
+        _q_pick = choose_quip(QuipContext(), "de", _q_random.Random(_q_seed))
+        assert _q_pick in _q_fb_de, "empty ctx must draw from smalltalk"
+    # non-fallback preferred: hour=2 alone must never yield smalltalk
+    _q_ln_all = {t.format(**template_values(QuipContext(hour=2)))
+                 for t in _q_ln.templates["de"]}
+    for _q_seed in range(20):
+        _q_pick = choose_quip(QuipContext(hour=2), "de",
+                              _q_random.Random(_q_seed))
+        assert _q_pick in _q_ln_all and _q_pick not in _q_fb_de, \
+            "specific rule must beat the fallback"
+    assert choose_quip(_q_rich, "en", _q_random.Random(1)) is not None
+    # scheduler: min interval + jitter, driven manually (no sleeping)
+    _q_sched = QuipScheduler(_q_random.Random(42))
+    assert _q_sched.should_fire(0.0), "fresh scheduler must be free to fire"
+    _q_sched.mark_fired(100.0)
+    assert not _q_sched.should_fire(100.0 + QUIP_MIN_INTERVAL_S - 1.0), \
+        "must stay quiet inside the min interval"
+    _q_wait = _q_sched._next_at - 100.0
+    assert QUIP_MIN_INTERVAL_S <= _q_wait <= QUIP_MIN_INTERVAL_S + QUIP_JITTER_S
+    assert _q_sched.should_fire(100.0 + QUIP_MIN_INTERVAL_S + QUIP_JITTER_S), \
+        "must fire once interval + max jitter passed"
+    _q_sched.mark_fired(2000.0)
+    assert not _q_sched.should_fire(2000.0 + QUIP_MIN_INTERVAL_S - 1.0)
+    print("[selftest] quips OK")
+
+    # --- fancy-wave integration: menus, minipets wiring, hat, quip, shell --
+    menu3 = capp.build_menu(None)
+    acts3 = [a.text() for a in menu3.actions() if a.text()]
+    assert tr("menu_ball") in acts3, "ball entry missing"
+    assert tr("menu_mischief") in acts3, "mischief toggle missing"
+    assert any(a.menu() is not None and a.text() == tr("menu_hat")
+               for a in menu3.actions()), "hat submenu missing"
+    menu3.deleteLater()
+    # subagent events spawn/despawn mini crabs (capped, cleaned on Stop)
+    capp._subagent_count = 0
+    for _ in range(3):
+        capp._handle_hook_event({"hook_event_name": "SubagentStart"})
+    assert capp.minipets.count() == 3, capp.minipets.count()
+    capp._handle_hook_event({"hook_event_name": "SubagentStop"})
+    assert capp.minipets.count() == 2
+    capp._handle_hook_event({"hook_event_name": "Stop"})
+    assert capp.minipets.count() == 0, "Stop must clear the mini crabs"
+    # hat: set + render path never raises; locked hats stay disabled
+    capp.set_hat("party")
+    assert capp.pet._hat == "party"
+    assert capp.pet.grab() is not None            # hat overlay paints fine
+    capp.set_hat("auto")
+    # quip fires through the app path with a forced scheduler
+    capp._quip_sched.should_fire = lambda now: True
+    fired_quips = []
+    capp.bubble.show_text = (lambda text, pet, *a, **kw:
+                             fired_quips.append(text))
+    capp.dnd = False
+    capp.quiet = False
+    capp.pet.show()
+    capp._maybe_quip()
+    assert fired_quips and isinstance(fired_quips[0], str)
+    # shell spawn path with a forced scheduler; collect grants XP
+    st_bk2 = (progress_mod.STATE_FILE, progress_mod._state_loaded,
+              progress_mod._xp, progress_mod._state_mtime)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            progress_mod.STATE_FILE = Path(td) / "st.json"
+            progress_mod._state_loaded = True
+            progress_mod._state_mtime = None
+            progress_mod._xp = 0.0
+            capp._shell_sched.should_spawn = lambda *a, **kw: True
+            capp._maybe_drop_shell(working=True)
+            assert capp._shell is not None, "shell must spawn while working"
+            shell_w = capp._shell
+            cb = shell_w._on_collect
+            shell_w.collected = True
+            shell_w._on_collect = None
+            shell_w.disappear()
+            cb(77)                                  # simulate the click payout
+            assert progress_mod.current()["xp"] >= 77, "shell XP not granted"
+            assert capp._shell is None
+    finally:
+        (progress_mod.STATE_FILE, progress_mod._state_loaded,
+         progress_mod._xp, progress_mod._state_mtime) = st_bk2
+    print("[selftest] fancy-wave integration OK")
+
     print("[selftest] OK")
     del app
     return 0

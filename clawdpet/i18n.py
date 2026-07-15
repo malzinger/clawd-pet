@@ -203,6 +203,11 @@ STRINGS = {
         "src_uncalibrated": "lokal – unkalibriert, grobe Werte",
         "src_rate_limited": "Live-Sync pausiert bis {t} (Rate-Limit)",
         "src_live_proj": "live {t} + Projektion",
+        # --- fancy wave: ball, mischief, hats-auto, shells ---
+        "menu_ball": "Ball werfen",
+        "menu_mischief": "Frechheit erlauben (Cursor zwicken)",
+        "hat_auto": "Automatisch",
+        "shell_collected": "+{xp} XP! Schöne Muschel.",
         # --- Telegram remote approval ---
         "menu_tg_on": "Telegram-Freigabe einrichten …",
         "menu_tg_off": "Telegram-Freigabe entfernen",
@@ -252,6 +257,18 @@ STRINGS = {
         "progress_line": "Level {n} · {title} · {xp} XP (nächstes: {nxt})",
         # --- W: window sitting ---
         "menu_window_sit": "Auf Fenstern sitzen",
+        # --- H: hats ---
+        "menu_hat": "Hut",
+        "hat_none": "Ohne",
+        "hat_party": "Partyhut",
+        "hat_hardhat": "Bauhelm",
+        "hat_beret": "Barett",
+        "hat_pirate": "Piratenhut",
+        "hat_wizard": "Zauberhut",
+        "hat_crown": "Krone",
+        "hat_santa": "Weihnachtsmütze",
+        "hat_sunglasses": "Sonnenbrille",
+        "hat_locked": "ab Level {n}",
     },
     "en": {
         "panel_title": "Plan usage limits · {plan}",
@@ -385,6 +402,11 @@ STRINGS = {
         "src_uncalibrated": "local – uncalibrated, rough numbers",
         "src_rate_limited": "live sync paused until {t} (rate limited)",
         "src_live_proj": "live {t} + projection",
+        # --- fancy wave: ball, mischief, hats-auto, shells ---
+        "menu_ball": "Throw ball",
+        "menu_mischief": "Allow mischief (cursor pinch)",
+        "hat_auto": "Automatic",
+        "shell_collected": "+{xp} XP! Nice shell.",
         # --- Telegram remote approval ---
         "menu_tg_on": "Set up Telegram approval …",
         "menu_tg_off": "Remove Telegram approval",
@@ -432,6 +454,18 @@ STRINGS = {
         "progress_line": "Level {n} · {title} · {xp} XP (next: {nxt})",
         # --- W: window sitting ---
         "menu_window_sit": "Sit on windows",
+        # --- H: hats ---
+        "menu_hat": "Hat",
+        "hat_none": "None",
+        "hat_party": "Party hat",
+        "hat_hardhat": "Hard hat",
+        "hat_beret": "Beret",
+        "hat_pirate": "Pirate hat",
+        "hat_wizard": "Wizard hat",
+        "hat_crown": "Crown",
+        "hat_santa": "Santa hat",
+        "hat_sunglasses": "Sunglasses",
+        "hat_locked": "from level {n}",
     },
 }
 

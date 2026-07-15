@@ -152,6 +152,20 @@ calibration), `api` (read-only live sync), `activity`/`hooks` (real time),
   the frontmost window's title bar, strolls along it and follows the
   window around; when it closes or moves away he tumbles to the floor.
   Uses only window geometry (no screen-recording permission needed).
+- **Fetch!** Tray → "Throw ball" flings a pixel ball with real physics;
+  Clawd scampers after it, retrieves it and earns XP.
+- **Hats:** level-ups unlock headgear (party hat → … → crown), drawn as
+  pixel overlays; "Automatic" picks seasonal ones (santa in December,
+  sunglasses in summer).
+- **Mini crabs:** every running subagent spawns a small scuttling crab
+  next to Clawd — they vanish when the subagents finish.
+- **Personality quips:** occasional context-aware one-liners in a speech
+  bubble (late-night coding, bash marathons, Codex rivalry …), politely
+  throttled and DND-gated.
+- **Shell drops:** during long agent runs Clawd rarely drops a clickable
+  shell worth bonus XP; unclaimed shells fade away.
+- **Mischief (opt-in):** very rarely, Clawd sneaks up on a RESTING cursor
+  and nudges it 60 px, then plays innocent.
 - **Levels & evolution:** Clawd eats your tokens — XP accumulates into
   levels and evolution titles (Hatchling → Crabling → … → Legend), shown
   in the panel; level-ups earn a celebration hop. No neglect mechanics.

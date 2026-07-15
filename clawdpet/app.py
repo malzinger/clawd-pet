@@ -224,6 +224,8 @@ class ClawdApp:
         self.click_through = self.settings.value("click_through", False, type=bool)
         self.cursor_chase = self.settings.value("cursor_chase", False, type=bool)
         self.window_sit = self.settings.value("window_sit", False, type=bool)
+        self.mischief = self.settings.value("mischief", False, type=bool)
+        self.hat = str(self.settings.value("hat", "auto") or "auto")
         self._was_sick = False           # Anthropic incident edge detection
         # burn-rate history and last pct are kept PER SOURCE ("api"/"logs"):
         # the two modes report on different absolute scales, so cross-comparing
@@ -331,10 +333,8 @@ class ClawdApp:
         self.pet.enable_cursor_chase(self.cursor_chase)  # Y (opt-in)
         if self.window_sit and window_tracking_available():
             self.pet.enable_window_sitting(True)         # W (opt-in)
-        self.mischief = self.settings.value("mischief", False, type=bool)
         if self.mischief:
             self.pet.enable_mischief(True)
-        self.hat = str(self.settings.value("hat", "auto") or "auto")
         self._apply_hat()
 
     # -------------------------------------------------- lifecycle

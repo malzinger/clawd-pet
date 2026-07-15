@@ -2108,6 +2108,84 @@ def run_selftest() -> int:
          progress_mod._xp, progress_mod._state_mtime) = st_bk
     print("[selftest] motion gates + visible progress OK")
 
+    # --- H: hats ---
+    from datetime import date as _h_date
+
+    from .hats import (
+        HATS,
+        anchor_for,
+        hat_available,
+        hat_pixmap,
+        season_default,
+        unlocked_hats,
+    )
+    from .i18n import STRINGS as _h_strings
+
+    # every hat definition has a label in BOTH languages, plus the menu keys
+    for _h_key, _h_def in HATS.items():
+        for _h_lang in ("de", "en"):
+            assert _h_def["label_key"] in _h_strings[_h_lang], (_h_key, _h_lang)
+    for _h_lang in ("de", "en"):
+        assert "menu_hat" in _h_strings[_h_lang], _h_lang
+        assert "hat_locked" in _h_strings[_h_lang], _h_lang
+        assert "{n}" in _h_strings[_h_lang]["hat_locked"], _h_lang
+
+    # pixmap generation: non-null with alpha for every drawable key, never raises
+    assert hat_pixmap("none", 60) is None and hat_pixmap("none", 140) is None
+    assert hat_pixmap("no-such-hat", 60) is None
+    for _h_key in HATS:
+        if _h_key == "none":
+            continue
+        for _h_w in (60, 140):
+            _h_pm = hat_pixmap(_h_key, _h_w)
+            assert _h_pm is not None and not _h_pm.isNull(), (_h_key, _h_w)
+            assert _h_pm.hasAlphaChannel(), (_h_key, _h_w)
+            # sized for the sprite: clearly narrower than the sprite itself
+            assert 0 < _h_pm.width() <= _h_w, (_h_key, _h_w, _h_pm.width())
+            # lru cache: identical args return the identical object
+            assert hat_pixmap(_h_key, _h_w) is _h_pm, (_h_key, _h_w)
+
+    # unlock thresholds: monotonic over the registry order, "none" always free
+    _h_prev = -1
+    for _h_key, _h_def in HATS.items():
+        if _h_def.get("seasonal"):
+            continue
+        assert _h_def["min_level"] >= _h_prev, "unlock thresholds not monotonic"
+        _h_prev = _h_def["min_level"]
+    assert HATS["none"]["min_level"] == 0
+    assert unlocked_hats(0) == ["none"]
+    assert unlocked_hats(4) == ["none", "party", "hardhat"]
+    assert "none" in unlocked_hats(99)
+    assert set(unlocked_hats(99)) == {
+        k for k, d in HATS.items() if not d.get("seasonal")}
+    # seasonal keys are never level rewards
+    assert "santa" not in unlocked_hats(99)
+    assert "sunglasses" not in unlocked_hats(99)
+    assert hat_available("none", 0)
+    assert not hat_available("party", 1) and hat_available("party", 2)
+    assert not hat_available("crown", 17) and hat_available("crown", 18)
+    assert not hat_available("no-such-hat", 99)
+    assert hat_available("santa", 0) and hat_available("sunglasses", 0)
+
+    # seasonal defaults are purely date-driven
+    assert season_default(_h_date(2026, 12, 1)) == "santa"
+    assert season_default(_h_date(2026, 12, 31)) == "santa"
+    assert season_default(_h_date(2026, 6, 1)) == "sunglasses"
+    assert season_default(_h_date(2026, 7, 15)) == "sunglasses"
+    assert season_default(_h_date(2026, 8, 31)) == "sunglasses"
+    assert season_default(_h_date(2026, 5, 31)) == "none"
+    assert season_default(_h_date(2026, 9, 1)) == "none"
+    assert season_default(_h_date(2026, 11, 30)) == "none"
+    assert season_default(_h_date(2026, 1, 1)) == "none"
+
+    # anchors: sunglasses overlay the eyes, everything else sits on top
+    assert anchor_for("sunglasses") == "eyes"
+    for _h_key in ("none", "party", "hardhat", "beret", "pirate",
+                   "wizard", "crown", "santa"):
+        assert anchor_for(_h_key) == "top", _h_key
+    assert anchor_for("no-such-hat") == "top"
+    print("[selftest] hats OK")
+
     print("[selftest] OK")
     del app
     return 0

@@ -237,3 +237,10 @@ MISCHIEF_PUSH_PX = 60             # how far the pinch drags the cursor
 # subagent swarm cannot flood the desktop with windows/timers.
 MINIPET_MAX = 5               # never show more mini crabs than this
 MINIPET_HEIGHT_FACTOR = 0.45  # mini height = PET_HEIGHT * this factor
+# --- Q: quips ---
+# Personality one-liners (quips.py): a quip may fire at most every
+# QUIP_MIN_INTERVAL_S seconds, plus a random 0..QUIP_JITTER_S so the pet
+# never quips on a metronome. The app owns the timer; the scheduler only
+# answers should_fire().
+QUIP_MIN_INTERVAL_S = 600.0
+QUIP_JITTER_S = 300.0

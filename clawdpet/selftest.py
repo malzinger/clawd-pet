@@ -2254,6 +2254,54 @@ def run_selftest() -> int:
         assert anchor_for(_h_key) == "top", _h_key
     assert anchor_for("no-such-hat") == "top"
     print("[selftest] hats OK")
+    # --- M: mini pets ---
+    from PyQt5.QtCore import QPoint
+    from .config import MINIPET_HEIGHT_FACTOR, MINIPET_MAX, PET_HEIGHT
+    from .minipets import MiniCrab, MiniPetManager
+    avail_m = app.primaryScreen().availableGeometry()
+    anchor_m = QPoint(avail_m.center().x(), avail_m.bottom() - 4)
+    mgr_m = MiniPetManager()
+    mgr_m.set_count(3, anchor_m)
+    assert mgr_m.count() == 3 and len(mgr_m.positions()) == 3
+    crabs_m = list(mgr_m._crabs)
+    assert all(isinstance(c, MiniCrab) and c.isVisible() for c in crabs_m)
+    assert all(c.height() == int(PET_HEIGHT * MINIPET_HEIGHT_FACTOR)
+               for c in crabs_m)
+    anchors_m = {(c._anchor.x(), c._anchor.y()) for c in crabs_m}
+    assert len(anchors_m) == 3, "mini anchors must be spread apart"
+    mgr_m.set_count(1, anchor_m)               # despawn most recent first
+    assert mgr_m.count() == 1 and mgr_m._crabs[0] is crabs_m[0]
+    assert crabs_m[0]._timer.isActive()
+    assert not crabs_m[1]._timer.isActive(), "despawned crab timer must stop"
+    assert not crabs_m[2]._timer.isActive(), "despawned crab timer must stop"
+    mgr_m.clear()
+    assert mgr_m.count() == 0 and mgr_m.positions() == []
+    assert not any(c._timer.isActive() for c in crabs_m), \
+        "no orphan 60 ms timers after clear()"
+    mgr_m.set_count(99, anchor_m)              # swarm: hard cap
+    assert mgr_m.count() == MINIPET_MAX
+    mgr_m.clear()
+    assert mgr_m.count() == 0
+    crab_m = MiniCrab(anchor_m)
+    crab_m.show()
+    crab_m.stop()                              # ticks are driven manually
+    raised_m = []
+    crab_m.raise_ = lambda: raised_m.append(1)
+    crab_m._state = "walk"                     # drive the walk state directly
+    crab_m._target_x = crab_m.x() - 80         # ... heading left
+    for _ in range(30):
+        crab_m._tick()
+        assert avail_m.contains(crab_m.geometry()), "mini crab left the screen"
+    assert not raised_m, "MiniCrab must never call raise_() (focus steal)"
+    assert crab_m._facing == -1, "facing must mirror while walking left"
+    crab_m._state = "walk"
+    crab_m._target_x = crab_m.x() + 80         # walking right flips it back
+    crab_m._tick()
+    assert crab_m._facing == 1
+    crab_m.hide()                              # hiding alone must stop the timer
+    assert not crab_m._timer.isActive()
+    crab_m.deleteLater()
+    print("[selftest] mini pets OK")
 
     print("[selftest] OK")
     del app

@@ -231,3 +231,9 @@ MISCHIEF_MIN_INTERVAL_S = 600.0   # opt-in cursor pinch, rare by design
 MISCHIEF_MAX_INTERVAL_S = 1800.0
 MISCHIEF_CURSOR_STILL_S = 20.0    # cursor must rest this long first
 MISCHIEF_PUSH_PX = 60             # how far the pinch drags the cursor
+# --- M: mini pets ---
+# One small crab per running subagent (clawdpet/minipets.py). Minis reuse the
+# idle sprite at a fraction of the main pet's height and are hard-capped so a
+# subagent swarm cannot flood the desktop with windows/timers.
+MINIPET_MAX = 5               # never show more mini crabs than this
+MINIPET_HEIGHT_FACTOR = 0.45  # mini height = PET_HEIGHT * this factor

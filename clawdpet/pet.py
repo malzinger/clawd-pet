@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import QWidget
 
 from . import macwindows
 from .art import ArtState, ClawdArt, SpriteSet
+from .hats import anchor_for, hat_pixmap
 from .config import (
     CELEBRATE_HOP_V,
     FETCH_SPEED_PX,
@@ -159,6 +160,7 @@ class PetWidget(QWidget):
         self._chase_timer.timeout.connect(self._chase_tick)
         self._generating = False       # Claude is generating -> typing-along bob
         self._celebrating = False
+        self._hat = "none"             # H: current hat key (drawn in _blit)
 
         # ball fetch (inline wave): walk to a landed ball and collect it
         self._fetch_ball = None
@@ -491,6 +493,24 @@ class PetWidget(QWidget):
             sweat_t=self._sweat_t,
         )
 
+    def set_hat(self, key: str):
+        """H: wear a hat (drawn as an overlay in _blit); '' / 'none' = bare."""
+        key = key or "none"
+        if key != self._hat:
+            self._hat = key
+            self.update()
+
+    def _draw_hat(self, p: QPainter, x: int, y: int, pm: QPixmap):
+        hat = hat_pixmap(self._hat, pm.width())
+        if hat is None:
+            return
+        hx = x + (pm.width() - hat.width()) // 2
+        if anchor_for(self._hat) == "eyes":
+            hy = y + int(pm.height() * 0.22)     # across the eye line
+        else:
+            hy = y - hat.height() * 2 // 3       # sits on top, brim overlaps
+        p.drawPixmap(hx, max(0, hy), hat)
+
     def _blit(self, p: QPainter, pm: QPixmap, opacity: float):
         if pm is None or pm.isNull() or opacity <= 0.001:
             return
@@ -510,9 +530,11 @@ class PetWidget(QWidget):
             p.scale(-1.0, 1.0)
             p.translate(-cx, 0)
             p.drawPixmap(x, y, pm)
+            self._draw_hat(p, x, y, pm)          # mirrored with the body
             p.restore()
             return
         p.drawPixmap(x, y, pm)
+        self._draw_hat(p, x, y, pm)
 
     def paintEvent(self, _event):
         p = QPainter(self)

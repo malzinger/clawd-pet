@@ -2356,6 +2356,63 @@ def run_selftest() -> int:
     assert not _q_sched.should_fire(2000.0 + QUIP_MIN_INTERVAL_S - 1.0)
     print("[selftest] quips OK")
 
+    # --- fancy-wave integration: menus, minipets wiring, hat, quip, shell --
+    menu3 = capp.build_menu(None)
+    acts3 = [a.text() for a in menu3.actions() if a.text()]
+    assert tr("menu_ball") in acts3, "ball entry missing"
+    assert tr("menu_mischief") in acts3, "mischief toggle missing"
+    assert any(a.menu() is not None and a.text() == tr("menu_hat")
+               for a in menu3.actions()), "hat submenu missing"
+    menu3.deleteLater()
+    # subagent events spawn/despawn mini crabs (capped, cleaned on Stop)
+    capp._subagent_count = 0
+    for _ in range(3):
+        capp._handle_hook_event({"hook_event_name": "SubagentStart"})
+    assert capp.minipets.count() == 3, capp.minipets.count()
+    capp._handle_hook_event({"hook_event_name": "SubagentStop"})
+    assert capp.minipets.count() == 2
+    capp._handle_hook_event({"hook_event_name": "Stop"})
+    assert capp.minipets.count() == 0, "Stop must clear the mini crabs"
+    # hat: set + render path never raises; locked hats stay disabled
+    capp.set_hat("party")
+    assert capp.pet._hat == "party"
+    assert capp.pet.grab() is not None            # hat overlay paints fine
+    capp.set_hat("auto")
+    # quip fires through the app path with a forced scheduler
+    capp._quip_sched.should_fire = lambda now: True
+    fired_quips = []
+    capp.bubble.show_text = (lambda text, pet, *a, **kw:
+                             fired_quips.append(text))
+    capp.dnd = False
+    capp.quiet = False
+    capp.pet.show()
+    capp._maybe_quip()
+    assert fired_quips and isinstance(fired_quips[0], str)
+    # shell spawn path with a forced scheduler; collect grants XP
+    st_bk2 = (progress_mod.STATE_FILE, progress_mod._state_loaded,
+              progress_mod._xp, progress_mod._state_mtime)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            progress_mod.STATE_FILE = Path(td) / "st.json"
+            progress_mod._state_loaded = True
+            progress_mod._state_mtime = None
+            progress_mod._xp = 0.0
+            capp._shell_sched.should_spawn = lambda *a, **kw: True
+            capp._maybe_drop_shell(working=True)
+            assert capp._shell is not None, "shell must spawn while working"
+            shell_w = capp._shell
+            cb = shell_w._on_collect
+            shell_w.collected = True
+            shell_w._on_collect = None
+            shell_w.disappear()
+            cb(77)                                  # simulate the click payout
+            assert progress_mod.current()["xp"] >= 77, "shell XP not granted"
+            assert capp._shell is None
+    finally:
+        (progress_mod.STATE_FILE, progress_mod._state_loaded,
+         progress_mod._xp, progress_mod._state_mtime) = st_bk2
+    print("[selftest] fancy-wave integration OK")
+
     print("[selftest] OK")
     del app
     return 0

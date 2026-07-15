@@ -156,6 +156,20 @@ Paket `clawdpet/` — grob: `usage` (Log-Scan, 5-h-Fenster, Kalibrierung),
   sich auf die Titelleiste des aktiven Fensters, spaziert darauf herum
   und folgt dem Fenster; verschwindet es, purzelt er zu Boden. Nutzt nur
   Fenster-Geometrie (keine Bildschirmaufnahme-Berechtigung nötig).
+- **Apport!** Tray → „Ball werfen" schleudert einen Pixel-Ball mit echter
+  Physik; Clawd flitzt hinterher, holt ihn zurück und bekommt XP.
+- **Hüte:** Level-ups schalten Kopfbedeckungen frei (Partyhut → … → Krone),
+  als Pixel-Overlays gezeichnet; „Automatisch" wählt saisonale (Nikolaus im
+  Dezember, Sonnenbrille im Sommer).
+- **Mini-Krabben:** Jeder laufende Subagent spawnt eine kleine Krabbe neben
+  Clawd — sie verschwinden, wenn die Subagenten fertig sind.
+- **Sprüche mit Persönlichkeit:** gelegentliche kontextbewusste Einzeiler
+  in der Sprechblase (Nachtschichten, Bash-Marathons, Codex-Rivalität …),
+  höflich gedrosselt und DND-gegated.
+- **Muschel-Drops:** Bei langen Agent-Läufen lässt Clawd selten eine
+  anklickbare Muschel fallen (Bonus-XP); unbeachtete verschwinden wieder.
+- **Frechheit (opt-in):** Ganz selten schleicht sich Clawd an einen
+  RUHENDEN Cursor an, schubst ihn 60 px weiter und tut unschuldig.
 - **Level & Evolution:** Clawd frisst deine Tokens — XP sammeln sich zu
   Leveln und Evolutions-Titeln (Hatchling → Crabling → … → Legend) im
   Panel; Level-ups gibt es mit Jubel-Hüpfer. Keine Vernachlässigungs-Strafen.

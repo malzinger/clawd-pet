@@ -47,6 +47,11 @@ from .api import (
     force_live_refetch,
 )
 from .art import import_sprite_pack, make_app_icon
+from .ball import BallWidget
+from .hats import HATS, hat_available, season_default
+from .minipets import MiniPetManager
+from .quips import QuipContext, QuipScheduler, choose_quip
+from .shells import ShellScheduler, ShellWidget
 from .autostart import autostart_enabled, autostart_supported, set_autostart
 from .bubble import SpeechBubble
 from .codex import (
@@ -259,6 +264,19 @@ class ClawdApp:
         self._remote_timer = QTimer()
         self._remote_timer.setInterval(250)
         self._remote_timer.timeout.connect(self._drain_remote_decisions)
+        # fancy wave: mini crabs per subagent, quips, shells, ball, hats
+        self.minipets = MiniPetManager()
+        self._tool_counts = {}            # PreToolUse tool -> count (quips ctx)
+        self._started_mono = time.monotonic()
+        import random as _rnd0
+        self._quip_sched = QuipScheduler(_rnd0.Random())
+        self._quip_timer = QTimer()
+        self._quip_timer.setInterval(60_000)
+        self._quip_timer.timeout.connect(self._maybe_quip)
+        self._quip_timer.start()
+        self._shell = None
+        self._shell_sched = ShellScheduler()
+        self._ball = None
         self._activity_timer = QTimer()
         self._activity_timer.setInterval(ACTIVITY_POLL_MS)
         self._activity_timer.timeout.connect(self._check_activity)
@@ -313,6 +331,11 @@ class ClawdApp:
         self.pet.enable_cursor_chase(self.cursor_chase)  # Y (opt-in)
         if self.window_sit and window_tracking_available():
             self.pet.enable_window_sitting(True)         # W (opt-in)
+        self.mischief = self.settings.value("mischief", False, type=bool)
+        if self.mischief:
+            self.pet.enable_mischief(True)
+        self.hat = str(self.settings.value("hat", "auto") or "auto")
+        self._apply_hat()
 
     # -------------------------------------------------- lifecycle
 
@@ -495,11 +518,21 @@ class ClawdApp:
         act_click.triggered.connect(self.toggle_click_through)
         menu.addAction(act_click)
 
+        act_ball = QAction(tr("menu_ball"), menu)       # fetch mini-game
+        act_ball.triggered.connect(self.throw_ball)
+        menu.addAction(act_ball)
+
         act_chase = QAction(tr("menu_chase"), menu)     # Y: oneko mode
         act_chase.setCheckable(True)
         act_chase.setChecked(self.cursor_chase)
         act_chase.triggered.connect(self.toggle_cursor_chase)
         menu.addAction(act_chase)
+
+        act_mis = QAction(tr("menu_mischief"), menu)    # cursor pinch
+        act_mis.setCheckable(True)
+        act_mis.setChecked(self.mischief)
+        act_mis.triggered.connect(self.toggle_mischief)
+        menu.addAction(act_mis)
 
         if window_tracking_available():                 # W: shimeji mode
             act_sit = QAction(tr("menu_window_sit"), menu)
@@ -519,6 +552,38 @@ class ClawdApp:
                 lambda _checked=False, k=key: self.set_pet_size(k))
             size_group.addAction(act_size)
             size_menu.addAction(act_size)
+
+        hat_menu = menu.addMenu(tr("menu_hat"))         # H: level rewards
+        from .progress import current as _prog_current
+        level = _prog_current()["level"]
+        hat_group = QActionGroup(hat_menu)
+        hat_group.setExclusive(True)
+        season = season_default(datetime.now().date())
+        auto_label = tr("hat_auto")
+        if season != "none":
+            auto_label += f" ({tr('hat_' + season)})"
+        act_auto = QAction(auto_label, hat_menu)
+        act_auto.setCheckable(True)
+        act_auto.setChecked(self.hat == "auto")
+        act_auto.triggered.connect(lambda _c=False: self.set_hat("auto"))
+        hat_group.addAction(act_auto)
+        hat_menu.addAction(act_auto)
+        for key in HATS:
+            if HATS[key].get("seasonal"):
+                continue
+            label = tr("hat_" + key)
+            act_h = QAction(label, hat_menu)
+            act_h.setCheckable(True)
+            act_h.setChecked(self.hat == key)
+            if not hat_available(key, level):
+                act_h.setEnabled(False)
+                act_h.setText(label + " — "
+                              + tr("hat_locked", n=HATS[key]["min_level"]))
+            else:
+                act_h.triggered.connect(
+                    lambda _c=False, k=key: self.set_hat(k))
+            hat_group.addAction(act_h)
+            hat_menu.addAction(act_h)
 
         act_sprites = QAction(tr("menu_sprites_choose"), menu)   # F13
         act_sprites.triggered.connect(self.choose_sprite_dir)
@@ -688,6 +753,7 @@ class ClawdApp:
         if time.monotonic() < self._hook_hold_until:
             return                       # live hook events drive the mood
         act = (ctx.kind, ctx.tool) if ctx and ctx.kind else None
+        self._maybe_drop_shell(bool(act and act[0] == "working"))
         prev = self._last_activity
         self._last_activity = act
         self.pet.set_activity(act)
@@ -826,6 +892,8 @@ class ClawdApp:
         if name == "PreToolUse":
             act = ("working", event.get("tool_name"))
             text = tool_bubble(event.get("tool_name"))
+            tool = str(event.get("tool_name") or "?")
+            self._tool_counts[tool] = self._tool_counts.get(tool, 0) + 1
         elif name == "Notification":
             act = ("needs_input", None)
             text = tr("bubble_input")
@@ -834,6 +902,7 @@ class ClawdApp:
             act = ("waiting", None)
             self._subagent_count = 0
             self._compacting = False
+            self.minipets.set_count(0)
         elif name in ("SubagentStart", "SubagentStop"):
             # X2: while subagents run, Clawd juggles them ("Task" maps to the
             # juggle mood via moods.TOOL_MOODS); the count never goes below 0
@@ -845,6 +914,10 @@ class ClawdApp:
                 act = ("working", "Task")
             else:
                 clear_act = True
+            self.minipets.set_count(
+                self._subagent_count,
+                QPoint(self.pet.x() + self.pet.width() // 2,
+                       self.pet.y() + self.pet.height()))
         elif name in ("PostToolUseFailure", "StopFailure"):
             # X2: a failure startles the pet — no toast (too noisy), and under
             # do-not-disturb nothing happens at all
@@ -947,6 +1020,98 @@ class ClawdApp:
         self.settings.setValue("wander", self.wander)
         self.pet.enable_wander(self.wander)
         self._rebuild_tray_menu()
+
+    def throw_ball(self):
+        """Fetch mini-game: launch a ball from the pet, Clawd retrieves it."""
+        import random as _rnd
+        if self._ball is not None:
+            try:
+                self._ball.remove()
+            except RuntimeError:
+                pass
+        ball = BallWidget()
+        vx = _rnd.choice((-1, 1)) * _rnd.uniform(420.0, 720.0)
+        ball.launch(self.pet.x() + self.pet.width() // 2,
+                    max(0, self.pet.y() - 40), vx, -_rnd.uniform(300.0, 520.0))
+        self._ball = ball
+
+        def _done():
+            self._ball = None
+            from .progress import add_usage
+            add_usage(25_000)             # 25 XP for a successful fetch
+        self.pet.on_fetch_done = _done
+        self.pet.fetch(ball)
+
+    def set_hat(self, key: str):
+        self.hat = key
+        self.settings.setValue("hat", key)
+        self._apply_hat()
+        self._rebuild_tray_menu()
+
+    def _apply_hat(self):
+        key = self.hat
+        if key == "auto":
+            key = season_default(datetime.now().date())
+        self.pet.set_hat(key)
+
+    def toggle_mischief(self):
+        self.mischief = not self.mischief
+        self.settings.setValue("mischief", self.mischief)
+        self.pet.enable_mischief(self.mischief)
+
+    def _maybe_quip(self):
+        """Personality quips: cheeky context one-liners, politely throttled."""
+        if (self.dnd or self.quiet or not self.pet.isVisible()
+                or self.bubble.isVisible()
+                or not self._quip_sched.should_fire(time.monotonic())):
+            return
+        import random as _rnd
+        from .progress import current as _prog_current
+        cur = _prog_current()
+        ctx = QuipContext(
+            hour=datetime.now().hour,
+            pct=self.snapshot.pct,
+            level=cur["level"], title=cur["title"],
+            codex_active=self._last_activity is None
+            and newest_codex_log() is not None,
+            session_minutes=(time.monotonic() - self._started_mono) / 60.0,
+            tool_counts=dict(self._tool_counts),
+            weekday=datetime.now().weekday(),
+        )
+        text = choose_quip(ctx, language(), _rnd.Random())
+        if text:
+            self._quip_sched.mark_fired(time.monotonic())
+            self.bubble.show_text(text, self.pet, 6500)
+
+    def _maybe_drop_shell(self, working: bool):
+        """Tiny-Pasture loop: rare collectible shells while agents work."""
+        pending = False
+        if self._shell is not None:
+            try:
+                pending = self._shell.isVisible()
+            except RuntimeError:
+                pending = False
+            if not pending:
+                self._shell = None
+        if not self._shell_sched.should_spawn(time.monotonic(),
+                                              pending, working):
+            return
+        import random as _rnd
+        shell = ShellWidget(self._shell_collected)
+        avail = self.pet._screen_avail()
+        x = self.pet.x() + _rnd.choice((-1, 1)) * _rnd.randint(90, 200)
+        x = max(avail.left(), min(x, avail.right() - shell.width()))
+        shell.appear(x, avail.bottom() - shell.height() - 2)
+        self._shell = shell
+
+    def _shell_collected(self, xp: int):
+        self._shell = None
+        from .progress import add_usage
+        event = add_usage(xp * 1000.0)
+        if not self.quiet and not self.dnd and self.pet.isVisible():
+            self.bubble.show_text(tr("shell_collected", xp=xp), self.pet, 3500)
+        if event is not None:
+            self._on_level_up(event)
 
     def toggle_window_sit(self):
         self.window_sit = not self.window_sit

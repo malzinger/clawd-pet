@@ -203,6 +203,11 @@ STRINGS = {
         "src_uncalibrated": "lokal – unkalibriert, grobe Werte",
         "src_rate_limited": "Live-Sync pausiert bis {t} (Rate-Limit)",
         "src_live_proj": "live {t} + Projektion",
+        # --- fancy wave: ball, mischief, hats-auto, shells ---
+        "menu_ball": "Ball werfen",
+        "menu_mischief": "Frechheit erlauben (Cursor zwicken)",
+        "hat_auto": "Automatisch",
+        "shell_collected": "+{xp} XP! Schöne Muschel.",
         # --- Telegram remote approval ---
         "menu_tg_on": "Telegram-Freigabe einrichten …",
         "menu_tg_off": "Telegram-Freigabe entfernen",
@@ -397,6 +402,11 @@ STRINGS = {
         "src_uncalibrated": "local – uncalibrated, rough numbers",
         "src_rate_limited": "live sync paused until {t} (rate limited)",
         "src_live_proj": "live {t} + projection",
+        # --- fancy wave: ball, mischief, hats-auto, shells ---
+        "menu_ball": "Throw ball",
+        "menu_mischief": "Allow mischief (cursor pinch)",
+        "hat_auto": "Automatic",
+        "shell_collected": "+{xp} XP! Nice shell.",
         # --- Telegram remote approval ---
         "menu_tg_on": "Set up Telegram approval …",
         "menu_tg_off": "Remove Telegram approval",

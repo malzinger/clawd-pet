@@ -218,3 +218,16 @@ CODEX_RETRY_S = 600.0          # after a failure wait even longer
 WINDOW_SIT_POLL_MS = 500    # frontmost-window poll cadence while enabled
 WINDOW_SIT_MIN_W = 200      # ignore windows narrower than this (palettes etc.)
 WINDOW_SIT_MIN_H = 100      # ignore windows flatter than this (toolbars etc.)
+
+# --- Ball fetch + shell drops + mischief (inline wave) -----------------------
+BALL_SIZE = 18                 # px, the fetch ball
+FETCH_SPEED_PX = 4.2           # pet speed per 50 ms tick while fetching
+SHELL_SIZE = 26                # px, collectible shell
+SHELL_XP_RANGE = (40, 160)     # bonus XP per collected shell
+SHELL_LIFETIME_S = 90.0        # unclaimed shells fade away
+SHELL_MIN_INTERVAL_S = 480.0   # spawn cadence while an agent works
+SHELL_MAX_INTERVAL_S = 1200.0
+MISCHIEF_MIN_INTERVAL_S = 600.0   # opt-in cursor pinch, rare by design
+MISCHIEF_MAX_INTERVAL_S = 1800.0
+MISCHIEF_CURSOR_STILL_S = 20.0    # cursor must rest this long first
+MISCHIEF_PUSH_PX = 60             # how far the pinch drags the cursor

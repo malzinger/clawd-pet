@@ -15,6 +15,11 @@ from . import macwindows
 from .art import ArtState, ClawdArt, SpriteSet
 from .config import (
     CELEBRATE_HOP_V,
+    FETCH_SPEED_PX,
+    MISCHIEF_CURSOR_STILL_S,
+    MISCHIEF_MAX_INTERVAL_S,
+    MISCHIEF_MIN_INTERVAL_S,
+    MISCHIEF_PUSH_PX,
     CELEBRATE_MS,
     CHASE_RELEASE_PX,
     CHASE_SPEED_PX,
@@ -154,6 +159,21 @@ class PetWidget(QWidget):
         self._chase_timer.timeout.connect(self._chase_tick)
         self._generating = False       # Claude is generating -> typing-along bob
         self._celebrating = False
+
+        # ball fetch (inline wave): walk to a landed ball and collect it
+        self._fetch_ball = None
+        self.on_fetch_done = None      # app callback: ball retrieved
+        self._fetch_carry = 0.0
+        self._fetch_timer = QTimer(self)
+        self._fetch_timer.setInterval(50)
+        self._fetch_timer.timeout.connect(self._fetch_tick)
+
+        # mischief (opt-in): rare cursor pinch, DesktopGoose-style but gentle
+        self._mischief_enabled = False
+        self._mischief_next = 0.0
+        self._mischief_armed = False
+        self._cursor_still_since = time.monotonic()
+        self._last_cursor_pos = None
 
         # W: window sitting (opt-in, macOS) — perch on the frontmost window.
         # The provider is injectable so the selftest can feed fake frames.
@@ -336,7 +356,8 @@ class PetWidget(QWidget):
         if self._chase_state == "caught":
             mood = "sleep"                         # napping on the caught cursor
         elif (((self._wander_enabled and self._wander_state == "walk")
-                or self._chase_state == "chase")
+                or self._chase_state == "chase"
+                or self._fetch_ball is not None)
                 and "carry" in self._sprites.sprites):
             # walking gait while wandering (F5) or chasing (Y) — at ANY quota
             # mood: a walking pet must show a walk cycle, the alarm look
@@ -635,6 +656,7 @@ class PetWidget(QWidget):
                 or self._react_active                   # petting reaction
                 or self._throw_active                   # flying (F12)
                 or self._chase_state != "wait"          # chasing/napping (Y)
+                or self._fetch_ball is not None         # fetching the ball
                 or self._activity is not None           # visibly working
                 or self._quota_mood == "sleep")         # truly asleep stays put
 
@@ -738,6 +760,8 @@ class PetWidget(QWidget):
                 or (self._wander_enabled and self._wander_state == "walk"))
 
     def _chase_tick(self):
+        if self._fetch_ball is not None:
+            return                       # the ball game has priority
         now = time.monotonic()
         if self._chase_state == "caught":
             target = self._chase_target_pos()
@@ -753,7 +777,11 @@ class PetWidget(QWidget):
             # engage whenever the debounce passed AND the cursor is actually
             # away — a cat next to the mouse just sits there
             target = self._chase_target_pos()
+            self._mischief_tick(now, target)
             cx = self.x() + self.width() // 2
+            if self._mischief_armed and abs(target.x() - cx) <= CHASE_RELEASE_PX:
+                self._mischief_pinch(now, target)      # already close enough
+                return
             if (now >= self._chase_next
                     and abs(target.x() - cx) > CHASE_RELEASE_PX):
                 self._chase_state = "chase"
@@ -776,7 +804,10 @@ class PetWidget(QWidget):
         dx = target.x() - cx
         catch_px = self.width() // 2 + CHASE_STOP_SHORT_PX
         if abs(dx) <= catch_px:
-            if avail.contains(target):
+            if self._mischief_armed and avail.contains(target):
+                self._chase_rearm(now)
+                self._mischief_pinch(now, target)    # snuck up on it — pinch!
+            elif avail.contains(target):
                 self._chase_state = "caught"         # gotcha — nap on it
                 self._update_mood()
             else:
@@ -883,6 +914,109 @@ class PetWidget(QWidget):
                 self.owner.pet_moved()
         self._window_sitting = True
         self._sit_frame = frame
+
+    # -------------------------------------------------- ball fetch (inline)
+
+    def fetch(self, ball) -> None:
+        """Chase a thrown ball once it lands and collect it. Fetch overrides
+        the cursor chase while active; a second ball replaces the first."""
+        if self._fetch_ball is not None:
+            try:
+                self._fetch_ball.remove()
+            except RuntimeError:
+                pass
+        self._fetch_ball = ball
+        self._fetch_carry = 0.0
+        self._mark_active()
+        self._fetch_timer.start()
+        self._update_mood()
+
+    @property
+    def fetching(self) -> bool:
+        return self._fetch_ball is not None
+
+    def _fetch_tick(self):
+        ball = self._fetch_ball
+        if ball is None:
+            self._fetch_timer.stop()
+            return
+        try:
+            alive = ball.isVisible()
+        except RuntimeError:            # widget already destroyed
+            alive = False
+        if not alive:
+            self._fetch_ball = None
+            self._fetch_timer.stop()
+            self._update_mood()
+            return
+        if not ball.landed:
+            return                      # still flying — watch it
+        if self._press_global is not None or self._throw_active:
+            return                      # the user has priority
+        cx = self.x() + self.width() // 2
+        bx = ball.x() + ball.width() // 2
+        dx = bx - cx
+        if abs(dx) <= self.width() // 2:       # got it!
+            ball.remove()
+            self._fetch_ball = None
+            self._fetch_timer.stop()
+            cb = self.on_fetch_done
+            if cb is not None:
+                cb()
+            if not self._react_active:         # brief happy hop
+                self.celebrate()
+            self._update_mood()
+            return
+        direction = 1 if dx > 0 else -1
+        self._fetch_carry += FETCH_SPEED_PX * direction
+        step = int(self._fetch_carry)
+        self._fetch_carry -= step
+        if step == 0:
+            return
+        avail = self._screen_avail()
+        left, right = avail.left(), avail.right() - self.width()
+        x = max(left, min(self.x() + step, right))
+        if self._wander_facing != direction:
+            self._wander_facing = direction
+            self.update()
+        self.move(x, self.y())
+        if self.owner:
+            self.owner.pet_moved()
+
+    # -------------------------------------------------- mischief (opt-in)
+
+    def enable_mischief(self, on: bool) -> None:
+        """Rare, gentle cursor pinch: Clawd sneaks to a RESTING cursor and
+        nudges it away. Strictly opt-in; rides on the chase machinery."""
+        self._mischief_enabled = bool(on)
+        self._mischief_armed = False
+        self._mischief_next = (time.monotonic()
+                               + random.uniform(MISCHIEF_MIN_INTERVAL_S,
+                                                MISCHIEF_MAX_INTERVAL_S))
+
+    def _mischief_tick(self, now: float, target) -> None:
+        """Called from the chase tick: track cursor rest, arm when due."""
+        if self._last_cursor_pos is None or target != self._last_cursor_pos:
+            self._last_cursor_pos = target
+            self._cursor_still_since = now
+            return
+        if (self._mischief_enabled and not self._mischief_armed
+                and now >= self._mischief_next
+                and now - self._cursor_still_since >= MISCHIEF_CURSOR_STILL_S):
+            self._mischief_armed = True
+
+    def _mischief_pinch(self, now: float, target) -> None:
+        """The pinch itself: nudge the cursor and act innocent."""
+        self._mischief_armed = False
+        self._mischief_next = now + random.uniform(MISCHIEF_MIN_INTERVAL_S,
+                                                   MISCHIEF_MAX_INTERVAL_S)
+        push = MISCHIEF_PUSH_PX * (1 if self._wander_facing >= 0 else -1)
+        try:
+            QCursor.setPos(target.x() + push, target.y())
+        except Exception:
+            return
+        self._last_startle = None       # allow the startle hop right away
+        self._startle()
 
     # -------------------------------------------------- throw physics (F12)
 

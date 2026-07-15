@@ -2108,6 +2108,76 @@ def run_selftest() -> int:
          progress_mod._xp, progress_mod._state_mtime) = st_bk
     print("[selftest] motion gates + visible progress OK")
 
+    # --- inline wave: ball fetch, shell drops, mischief --------------------
+    from clawdpet.ball import BallWidget
+    from clawdpet.shells import ShellScheduler, ShellWidget
+    from clawdpet.config import SHELL_XP_RANGE
+    ball = BallWidget()
+    avail_b = pet._screen_avail()
+    ball.launch(avail_b.center().x(), avail_b.top() + 40, 220.0, 0.0)
+    for _ in range(3000):
+        if not ball.step(0.033, avail_b):
+            break
+    assert ball.landed, "ball must come to rest"
+    assert ball.y() >= avail_b.bottom() - ball.height() - 2, "ball rests on floor"
+    # fetch: pet walks to the landed ball and collects it
+    pet.move(avail_b.left() + 10, avail_b.bottom() - pet.height())
+    ball.move(pet.x() + 300, ball.y())
+    fetched = []
+    pet.on_fetch_done = lambda: fetched.append(1)
+    pet.set_activity(None)
+    pet.fetch(ball)
+    assert pet.fetching
+    for _ in range(400):
+        pet._fetch_tick()
+        if not pet.fetching:
+            break
+    assert fetched == [1], "fetch callback must fire exactly once"
+    assert not pet.fetching
+    pet._stop_throw()                                 # cancel the happy hop
+    pet._end_reaction()
+    pet.on_fetch_done = None
+    print("[selftest] ball fetch OK")
+
+    got_xp = []
+    shell = ShellWidget(got_xp.append)
+    shell.appear(avail_b.left() + 50, avail_b.bottom() - 60)
+    class _FakeEv:
+        def button(self):
+            from PyQt5.QtCore import Qt as _Qt
+            return _Qt.LeftButton
+        def accept(self):
+            pass
+    shell.mousePressEvent(_FakeEv())
+    shell.mousePressEvent(_FakeEv())                  # double click safe
+    assert len(got_xp) == 1 and SHELL_XP_RANGE[0] <= got_xp[0] <= SHELL_XP_RANGE[1]
+    import random as _rnd
+    sched = ShellScheduler(_rnd.Random(7))
+    t0 = 1000.0
+    sched.arm(t0)
+    assert not sched.should_spawn(t0 + 1, pending=False, working=True)
+    assert not sched.should_spawn(t0 + 99999, pending=True, working=True)
+    assert not sched.should_spawn(t0 + 99999, pending=False, working=False)
+    assert sched.should_spawn(t0 + 99999, pending=False, working=True)
+    assert not sched.should_spawn(t0 + 99999 + 1, pending=False, working=True)
+    print("[selftest] shell drops OK")
+
+    from PyQt5.QtCore import QPoint as _QP
+    pet.enable_mischief(True)
+    pet._mischief_next = 0.0                          # due immediately
+    tgt = _QP(500, 500)
+    pet._mischief_tick(1000.0, tgt)                   # first sighting arms rest-clock
+    assert not pet._mischief_armed
+    pet._cursor_still_since = 900.0                   # rested long enough
+    pet._mischief_tick(1000.0, tgt)
+    assert pet._mischief_armed, "due + resting cursor must arm the pinch"
+    pet._mischief_pinch(1000.0, tgt)
+    assert not pet._mischief_armed and pet._mischief_next > 1000.0
+    pet._stop_throw()
+    pet._end_reaction()
+    pet.enable_mischief(False)
+    print("[selftest] mischief OK")
+
     print("[selftest] OK")
     del app
     return 0

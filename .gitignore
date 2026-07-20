@@ -1,6 +1,12 @@
 # Python
 __pycache__/
 *.pyc
+venv/
+.venv/
+.bin/
+
+# macOS
+.DS_Store
 
 # Selftest-Artefakte (werden bei jedem --selftest neu erzeugt)
 panel_preview*.png

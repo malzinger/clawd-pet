@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  selftest:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Qt runtime libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1 libegl1 libxkbcommon-x11-0 libdbus-1-3
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyflakes
+
+      - name: Lint (pyflakes)
+        # the clawd_pet.py shim re-exports the public API on purpose, so it
+        # is excluded from the unused-import check
+        run: python -m pyflakes clawdpet clawd_hook.py clawd_statusline.py codex_notify.py clawd_permission_hook.py make_website_assets.py tools
+
+      - name: Selftest (headless)
+        env:
+          QT_QPA_PLATFORM: offscreen
+          CLAWD_NO_API: "1"
+        run: python clawd_pet.py --selftest

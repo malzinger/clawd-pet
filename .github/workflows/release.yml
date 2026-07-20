@@ -1,0 +1,64 @@
+name: release
+
+# Tag a version (v1.9.0 ...) and this builds the desktop bundles and attaches
+# them to a GitHub Release: a onefile ClawdPet.exe on Windows and a zipped
+# ClawdPet.app on macOS. PyInstaller flags mirror the README; every helper
+# script that gets copied out at runtime (hooks, statusline, codex notify)
+# must ride along in the payload.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build ClawdPet.exe
+        run: |
+          pip install -r requirements.txt pyinstaller
+          python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ico" --add-data "sprites;sprites" --add-data "sounds;sounds" --add-data "clawd_hook.py;." --add-data "clawd_permission_hook.py;." --add-data "clawd_statusline.py;." --add-data "codex_notify.py;." clawd_pet.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClawdPet-windows
+          path: dist/ClawdPet.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build ClawdPet.app
+        run: |
+          pip install -r requirements.txt pyinstaller
+          # no --icon here: PyInstaller on macOS needs .icns (we only ship .ico)
+          python -m PyInstaller --onefile --windowed --name ClawdPet --add-data "sprites:sprites" --add-data "sounds:sounds" --add-data "clawd_hook.py:." --add-data "clawd_permission_hook.py:." --add-data "clawd_statusline.py:." --add-data "codex_notify.py:." clawd_pet.py
+          cd dist && zip -ry ClawdPet-macos.zip ClawdPet.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClawdPet-macos
+          path: dist/ClawdPet-macos.zip
+
+  release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ClawdPet.exe
+            dist/ClawdPet-macos.zip
+          generate_release_notes: true

@@ -35,8 +35,16 @@ Die eigenständige exe selbst bauen:
 
 ```bash
 pip install pyinstaller
-python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ico" --add-data "sprites;sprites" --add-data "clawd_hook.py;." clawd_pet.py
+python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ico" --add-data "sprites;sprites" --add-data "sounds;sounds" --add-data "clawd_hook.py;." --add-data "clawd_permission_hook.py;." clawd_pet.py
 ```
+
+## Code-Aufbau
+
+`clawd_pet.py` ist nur der Einstiegspunkt; die Implementierung liegt im
+Paket `clawdpet/` — grob: `usage` (Log-Scan, 5-h-Fenster, Kalibrierung),
+`api` (Read-only-Live-Sync), `activity`/`hooks` (Echtzeit), `art`/`pet`/
+`panel`/`bubble` (Qt-Oberfläche), `app` (Controller + Tray) und `selftest`
+(Headless-Smoke-Test, läuft auch in der CI).
 
 ## Clawds Stimmungen
 
@@ -47,6 +55,8 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
 | 50 – 80 %       | Werkelt    | hämmert fleißig mit Bauhelm         |
 | 80 – 100 %      | Panik      | hektisches Debugging                |
 | ≥ 100 %         | Limit      | auf dem Rücken, X-Augen, ERROR      |
+
+![Clawds Stimmungen](docs/moods_preview.png)
 
 ## Was es macht
 
@@ -95,8 +105,8 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
 - **Update-Prüfung:** Beim Start (und alle 6 Std.) fragt Clawd bei GitHub
   nach, ob eine neuere Version existiert, und zeigt bei Bedarf eine Sprechblase
   zum Herunterladen. Im Tray-Menü abschaltbar.
-- **Mit Windows starten:** Ein Häkchen im Tray-Menü registriert oder
-  entfernt den Autostart (nur Windows).
+- **Beim Anmelden starten:** Ein Häkchen im Tray-Menü registriert oder
+  entfernt den Autostart (Windows-Run-Key bzw. macOS-LaunchAgent).
 - **Reagiert in Echtzeit:** Ein leichtgewichtiger Watcher verfolgt das neueste
   Session-Log — Clawd hämmert, während Claude Tools ausführt, freut sich, wenn
   der Turn fertig ist, und Sprechblasen verraten, was gerade passiert („führt
@@ -105,7 +115,78 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
   registriert Claude-Code-Hooks für Sofort-Reaktionen — inklusive „Claude
   wartet auf deine Eingabe". Benötigt Python im PATH; von `settings.json`
   wird ein `.clawd-bak`-Backup angelegt, Deaktivieren geht im selben Menü.
-- **Streicheln:** Doppelklick auf Clawd lässt Herzchen aufsteigen.
+  Die Events sind mit einem lokalen Token (`~/.clawd/hook_token`)
+  authentifiziert, damit kein anderer Prozess auf dem Rechner sie fälschen
+  kann.
+- **Permission-Bubble (Beta, opt-in):** Fragt Claude Code nach einer
+  Berechtigung, erscheint eine kleine Erlauben/Ablehnen-Karte am Pet — ein
+  Klick beantwortet den Prompt, ohne ins Terminal zu wechseln. Fail-open:
+  Reagierst du nicht (oder läuft das Pet nicht), übernimmt nach einem kurzen
+  Moment der normale Terminal-Prompt. Nutzt den dedizierten
+  `PermissionRequest`-Hook und denselben authentifizierten lokalen Kanal.
+- **Nicht stören:** Ein Tray-Schalter stellt Sprechblasen, Toasts und Sounds
+  auf einmal stumm (Permission-Fragen bleiben dann im Terminal). Und ein
+  Klick auf eine „Claude braucht dich"-Bubble holt dein Terminal nach vorn
+  (macOS; Warp, iTerm2, Terminal, VS Code, Cursor).
+- **Streicheln:** Doppelklick auf Clawd lässt Herzchen aufsteigen. Pack ihn
+  und schleudere ihn — er fliegt im Bogen, prallt an den Bildschirmkanten ab
+  und landet wieder auf den Füßen. Schleicht sich der Mauszeiger an den
+  schlafenden Clawd heran, schreckt er kurz hoch. Delegiert Claude an
+  Subagenten (Task/Agent-Tools), jongliert Clawd.
+- **Herumlaufen (opt-in):** Ein Tray-Schalter lässt Clawd im Leerlauf über
+  den Bildschirm spazieren — an den Kanten dreht er um, bei Hover, Drag oder
+  sobald Claude arbeitet, bleibt er stehen.
+- **Auch Codex CLI — mit echten Zahlen:** Wer zusätzlich OpenAIs Codex CLI
+  nutzt, sieht Clawd auch auf dessen Sessions reagieren, bekommt Codex'
+  echte Rate-Limits ins Panel (lokal via `codex app-server` gelesen, z. B.
+  „Codex · Woche 51 %") und optional eine „Dein Turn"-Meldung, wenn ein
+  Codex-Turn fertig ist. Claude-Sessions haben immer Vorrang.
+- **Kontext-Fenster-Anzeige (opt-in):** Clawd registriert sich als
+  Claude-Code-Statusline und das Panel zeigt, wie voll das aktuelle
+  Kontextfenster ist — Claude Code selbst bekommt eine kompakte Füllstands-
+  Zeile dazu. Eine bereits konfigurierte Statusline wird nie ersetzt.
+- **Mehr Live-Reaktionen:** Clawd jongliert, solange Subagenten laufen,
+  erschrickt bei Tool-Fehlern, fegt beim Kontext-Compacting, „tippt mit",
+  während Claude generiert, und macht einen Jubel-Hüpfer, wenn ein
+  Nutzungsfenster zurückgesetzt wird. Bei einer Anthropic-Störung sagt das
+  Panel Bescheid (Status-Page-Check, fail-open).
+- **Cursorjagd (opt-in):** oneko-Style — im Leerlauf jagt Clawd gelegentlich
+  den Mauszeiger, fängt ihn und schläft darauf ein, bis er entkommt.
+- **Auf Fenstern sitzen (opt-in, macOS):** Shimeji-Style — Clawd setzt
+  sich auf die Titelleiste des aktiven Fensters, spaziert darauf herum
+  und folgt dem Fenster; verschwindet es, purzelt er zu Boden. Nutzt nur
+  Fenster-Geometrie (keine Bildschirmaufnahme-Berechtigung nötig).
+- **Apport!** Tray → „Ball werfen" schleudert einen Pixel-Ball mit echter
+  Physik; Clawd flitzt hinterher, holt ihn zurück und bekommt XP.
+- **Hüte:** Level-ups schalten Kopfbedeckungen frei (Partyhut → … → Krone),
+  als Pixel-Overlays gezeichnet; „Automatisch" wählt saisonale (Nikolaus im
+  Dezember, Sonnenbrille im Sommer).
+- **Mini-Krabben:** Jeder laufende Subagent spawnt eine kleine Krabbe neben
+  Clawd — sie verschwinden, wenn die Subagenten fertig sind.
+- **Sprüche mit Persönlichkeit:** gelegentliche kontextbewusste Einzeiler
+  in der Sprechblase (Nachtschichten, Bash-Marathons, Codex-Rivalität …),
+  höflich gedrosselt und DND-gegated.
+- **Muschel-Drops:** Bei langen Agent-Läufen lässt Clawd selten eine
+  anklickbare Muschel fallen (Bonus-XP); unbeachtete verschwinden wieder.
+- **Frechheit (opt-in):** Ganz selten schleicht sich Clawd an einen
+  RUHENDEN Cursor an, schubst ihn 60 px weiter und tut unschuldig.
+- **Level & Evolution:** Clawd frisst deine Tokens — XP sammeln sich zu
+  Leveln und Evolutions-Titeln (Hatchling → Crabling → … → Legend) im
+  Panel; Level-ups gibt es mit Jubel-Hüpfer. Keine Vernachlässigungs-Strafen.
+- **Remote-Freigabe via Telegram (opt-in):** Eigenen Bot mitbringen
+  (Token + Chat-ID, 0600 gespeichert) und Berechtigungsfragen kommen
+  zusätzlich mit Erlauben/Ablehnen-Buttons aufs Handy — die erste Antwort
+  gewinnt (Klick am Rechner oder Tap am Handy), ohne Antwort greift
+  weiterhin der normale Terminal-Prompt.
+- **Akku-schonend:** Nach einer Minute echtem Leerlauf taktet die Animation
+  herunter und springt bei jeder Aktivität sofort zurück.
+- **Kosten-Schätzung & Projekt-Split:** Das Panel zeigt den ungefähren
+  API-Gegenwert des aktuellen Fensters/der Woche und welche Projekte die
+  meisten Tokens verbrauchen (Top 3).
+- **Mach ihn zu deinem:** Tray-Menü mit drei Größen (S/M/L), optionalen
+  Benachrichtigungs-Sounds (mit System-Beep-Fallback), Klick-Durchlässigkeit
+  und eigenen Sprite-Packs — einen Ordner mit kompatiblen GIFs wählen oder
+  ein Community-Pack (petdex / „Codex pet"-Zip) über das Tray-Menü importieren.
 - **Zweisprachig:** Die komplette Oberfläche (Panel, Sprechblasen, Menüs,
   Dialoge, Zahlenformate) schaltet zwischen Deutsch und Englisch um —
   Tray-Menü → „Language/Sprache".

@@ -68,18 +68,18 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
   zeigt eine Benachrichtigung, wenn Claude auf dich wartet. Wenn er nichts zu
   tun hat, spielt er ab und zu eine zufällige Animation (jonglieren, fegen,
   dirigieren …), und wenn du ihn zu oft streichelst, wird er genervt.
-- **Live-Sync (exakte Zahlen):** Clawd zeigt exakt die Auslastung aus Claudes
-  eigenem `/usage`-Popup, alle paar Sekunden aktualisiert. Richte einmalig
-  **Clawds eigenen Login** ein (Tray-Menü → „Clawd-Login einrichten …") — dann
-  hält Clawd ein **separates, selbst-erneuerndes** OAuth-Token in
-  `~/.clawd/auth.json` für dauerhaft exakte Zahlen. Das ist eine eigene
-  Anmeldung (wie ein drittes Gerät), die Claude Codes Login **nie** anfasst; das
-  Erneuern kann dich also nicht aus Claude Code aussperren. Ohne diesen Login
-  liest Clawd Claude Codes Token **read-only** (erneuert/schreibt die geteilte
-  Datei nie) und nutzt sonst die kalibrierte Schätzung.
-- **Selbst-kalibrierend (Fallback):** Ist der Live-Sync nicht verfügbar,
-  Rechtsklick → „Limit kalibrieren …" und den Prozentwert aus Claudes
-  eigenem `/usage`-Popup eintippen — die App leitet daraus dein echtes Budget ab.
+- **Keine Anmeldung, niemals.** Clawd loggt dich nicht ein und liest oder
+  erneuert kein OAuth-Token und keine Credential-Datei. Anthropics
+  Claude-Code-Bedingungen erlauben Drittanbietern weder einen Claude.ai-Login
+  anzubieten noch Abo-Zugangsdaten in anderen Tools zu verwenden — Clawd
+  arbeitet daher ausschließlich mit den Logs, die Claude Code ohnehin lokal
+  schreibt. Ein Selbsttest stellt sicher, dass kein Credential-Codepfad
+  zurückkehren kann.
+- **Selbst-kalibrierend:** Anthropic veröffentlicht die echten Token-Kontingente
+  nicht. Rechtsklick → „Limit kalibrieren …", einmal den Prozentwert aus Claudes
+  eigenem `/usage`-Popup eintippen — die App leitet daraus dein echtes Budget ab,
+  speichert es und skaliert alle weiteren Messungen daran. Prozentwerte sind mit
+  `lokal` gekennzeichnet, damit klar ist: kalibrierte Schätzung, kein Live-Wert.
 - **Burn-Rate-Prognose:** Das Panel rechnet hoch, wann du bei aktuellem
   Tempo das Limit erreichst („Bei diesem Tempo: Limit ca. 16:40 Uhr") —
   oder bestätigt, dass das Tempo bis zum Reset reicht.

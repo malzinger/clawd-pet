@@ -66,18 +66,17 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
   notification when Claude needs your input. When idle he plays the occasional
   random flourish (juggling, sweeping, conducting …), and over-petting him
   makes him grumpy.
-- **Live sync (exact numbers):** Clawd shows the exact utilisation Claude's own
-  `/usage` popup does, refreshed every few seconds. Set up **Clawd's own login**
-  once (tray menu → "Set up Clawd login …") and Clawd keeps a separate,
-  auto-refreshing OAuth token in `~/.clawd/auth.json` for permanent live numbers —
-  a distinct grant (like a third device) that never touches Claude Code's own
-  login, so refreshing it can't lock you out of Claude Code. Without it, Clawd
-  falls back to reading Claude Code's token **read-only** (never refreshing or
-  writing that shared file), and to the calibrated local estimate when no token
-  is valid.
-- **Self-calibrating (fallback):** if the live sync is unavailable, right-click →
-  "Limit kalibrieren …" and type the percentage from Claude's `/usage` popup; the
-  app derives your real budget from it and stores it.
+- **No sign-in, ever.** Clawd never logs you in and never reads or refreshes any
+  OAuth token or credential file. Anthropic's Claude Code terms do not permit
+  third-party developers to offer Claude.ai login or to use subscription
+  credentials in other tools, so Clawd works purely from the logs Claude Code
+  already writes on your disk. A self-test enforces that no credential code path
+  can come back.
+- **Self-calibrating:** Anthropic does not publish the actual token quotas, so
+  right-click → "Calibrate limit …" and type the percentage Claude's own `/usage`
+  popup shows once — the app derives your real budget from it, stores it, and
+  every later reading is scaled from that. Percentages are marked `local` so you
+  always know they are a calibrated estimate rather than a live figure.
 - **Burn-rate forecast:** the panel projects when you would hit the limit at
   your current pace ("At this pace: limit around 16:40") — or confirms the
   pace lasts until the reset.

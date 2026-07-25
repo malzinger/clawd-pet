@@ -170,32 +170,9 @@ HOOK_UDP_PORT = 52741       # clawd_hook.py sends Claude Code events here
 CLAUDE_SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
 HOOK_EVENTS = ["PreToolUse", "Notification", "Stop", "SessionStart"]
 
-# --- Live sync with the Anthropic usage endpoint ----------------------------
-# Two token sources, in order of preference:
-#  1. Clawd's OWN independent OAuth token in ~/.clawd/auth.json (set up via the
-#     one-time login, "Clawd-Login einrichten"). This is a separate grant — like
-#     a third device — so Clawd may auto-refresh it freely: rotating it only ever
-#     affects this file and can never lock the user out of Claude Code.
-#  2. Fallback: the token Claude Code itself stored in ~/.claude/.credentials.json,
-#     READ-ONLY. Clawd never refreshes or writes that shared file, because a
-#     failed write-back of Claude Code's rotating token could break its login.
-# If neither token is valid, the local log estimate is used; the last live
-# reading is remembered as a calibration so the estimate stays close.
-USE_API_USAGE = True
-CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
-CLAWD_AUTH_FILE = Path.home() / ".clawd" / "auth.json"     # Clawd's own token (writable)
-USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
-OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"   # Claude Code's public client id
-REFRESH_COOLDOWN_S = 300.0         # don't retry a failing own-token refresh more than every 5 min
-API_OK_INTERVAL_S = 30.0           # hit the usage endpoint at most this often when healthy
-API_RETRY_S = 5.0                  # base back-off after a failed usage fetch
-API_MAX_BACKOFF_S = 120.0          # cap the exponential back-off on repeated failures
-API_STALE_S = 180.0                # keep showing the last live % up to this long, then estimate
-
 ORG_NAME = "ClawdPet"
 APP_NAME = "Clawd"
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.9.0"
 
 # --- Burn-rate forecast + threshold notifications ----------------------------
 BURN_LOOKBACK_S = 3600      # forecast fits over at most the last hour
@@ -242,8 +219,7 @@ class UsageSnapshot:
     files_scanned: int = 0
     entries: int = 0
     error: str = ""
-    source: str = "logs"                          # "api" (live) or "logs" (estimate)
-    buckets: list = field(default_factory=list)   # list[UsageBucket] in api mode
+    source: str = "logs"                          # always "logs" — the only source
     by_model: dict = field(default_factory=dict)  # model id -> input+output tokens
     newest_file: str = ""                         # most recently written session log
     week_total: int = 0                           # input+output in the weekly window
@@ -566,304 +542,19 @@ class ScanThread(QThread):
 
 
 # ======================================================================
-#  Live usage via the Anthropic OAuth API — the same numbers the Claude
-#  UI shows (5-hour window + weekly limits), incl. token auto-refresh.
+#  Usage source: local logs only
 # ======================================================================
-
-@dataclass
-class UsageBucket:
-    key: str
-    label: str
-    pct: float
-    resets_at: Optional[datetime]
-
-
-def bucket_label(key: str) -> str:
-    if key == "five_hour":
-        return tr("row_5h")
-    if key == "seven_day":
-        return tr("row_week_all")
-    if key.startswith("seven_day_"):
-        name = key[len("seven_day_"):].replace("_", " ").title()
-        return tr("row_week_model", name=name)
-    return key.replace("_", " ").title()
-
-
-_clawd_refresh_ts = 0.0            # throttles own-token refresh attempts (module-global)
-
-
-def _store_clawd_auth(auth: dict) -> bool:
-    """Atomically write Clawd's own token file, tightened to owner-only perms."""
-    try:
-        CLAWD_AUTH_FILE.parent.mkdir(exist_ok=True)
-        tmp = CLAWD_AUTH_FILE.with_name(CLAWD_AUTH_FILE.name + ".tmp")
-        tmp.write_text(json.dumps(auth), encoding="utf-8")
-        os.replace(str(tmp), str(CLAWD_AUTH_FILE))
-        try:
-            os.chmod(str(CLAWD_AUTH_FILE), 0o600)   # no-op-ish on Windows, protects POSIX
-        except OSError:
-            pass
-        return True
-    except OSError:
-        return False
-
-
-def _refresh_clawd_token(auth: dict) -> Optional[str]:
-    """Refresh Clawd's OWN independent token (~/.clawd/auth.json) and write it
-    back. Safe to write: this grant is separate from Claude Code's login, so a
-    failed refresh only ever drops Clawd back to the read-only/estimate path —
-    it can never lock the user out of Claude Code. Throttled; returns the new
-    access token or None on any failure."""
-    global _clawd_refresh_ts
-    now = time.time()
-    if now - _clawd_refresh_ts < REFRESH_COOLDOWN_S:
-        return None
-    _clawd_refresh_ts = now
-    refresh = auth.get("refresh_token")
-    if not refresh:
-        return None
-    body = json.dumps({
-        "grant_type": "refresh_token",
-        "refresh_token": refresh,
-        "client_id": OAUTH_CLIENT_ID,
-    }).encode("utf-8")
-    req = urllib.request.Request(OAUTH_TOKEN_URL, data=body, method="POST", headers={
-        "Content-Type": "application/json",
-        "User-Agent": "ClawdPet/1.0",
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.load(resp)
-    except (urllib.error.URLError, OSError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    new_at = data.get("access_token")
-    if not new_at:
-        return None
-    auth["access_token"] = new_at
-    if data.get("refresh_token"):
-        auth["refresh_token"] = data["refresh_token"]
-    exp_in = data.get("expires_in")
-    if isinstance(exp_in, (int, float)) and exp_in > 0:
-        auth["expires_at"] = int(time.time() * 1000 + exp_in * 1000)
-    _store_clawd_auth(auth)                        # best-effort; own file, low stakes
-    return new_at
-
-
-def _clawd_own_token() -> Optional[str]:
-    """Clawd's own independent access token, refreshing it if it has expired."""
-    try:
-        auth = json.loads(CLAWD_AUTH_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    token = auth.get("access_token")
-    expires_ms = auth.get("expires_at") or 0
-    if token and time.time() * 1000 < expires_ms - 60_000:
-        return token
-    return _refresh_clawd_token(auth)   # expired — safe self-refresh of our own token
-
-
-def _get_access_token() -> Optional[str]:
-    """Prefer Clawd's own independent token (auto-refreshed); otherwise fall back
-    to the token Claude Code stored, READ-ONLY (never refreshed or written, so a
-    rotation we could not persist can never lock the user out of Claude Code)."""
-    if os.environ.get("CLAWD_NO_API"):
-        return None
-    own = _clawd_own_token()
-    if own:
-        return own
-    try:
-        creds = json.loads(CREDENTIALS_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    oauth = creds.get("claudeAiOauth") or {}
-    token = oauth.get("accessToken")
-    expires_ms = oauth.get("expiresAt") or 0
-    if token and time.time() * 1000 < expires_ms - 60_000:
-        return token
-    return None                   # both expired — fall back to the log estimate
-
-
-def _clawd_build_authorize_url():
-    """Build a fresh PKCE authorize URL for Clawd's own login.
-    Returns (url, code_verifier, redirect_uri)."""
-    import secrets, hashlib, base64, urllib.parse
-    redirect = "https://console.anthropic.com/oauth/code/callback"
-    verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
-    challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
-    state = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
-    params = {
-        "code": "true", "client_id": OAUTH_CLIENT_ID, "response_type": "code",
-        "redirect_uri": redirect, "scope": "user:profile user:inference",
-        "code_challenge": challenge, "code_challenge_method": "S256", "state": state,
-    }
-    return ("https://platform.claude.com/oauth/authorize?"
-            + urllib.parse.urlencode(params), verifier, redirect)
-
-
-def _clawd_exchange_code(raw_code: str, verifier: str, redirect_uri: str) -> None:
-    """Exchange the pasted authorization code (``code#state``) for Clawd's own
-    token and store it in ~/.clawd/auth.json. Raises on failure."""
-    raw = raw_code.strip()
-    code, _, state = raw.partition("#")
-    body = json.dumps({
-        "grant_type": "authorization_code", "code": code, "state": state,
-        "code_verifier": verifier, "client_id": OAUTH_CLIENT_ID,
-        "redirect_uri": redirect_uri,
-    }).encode("utf-8")
-    req = urllib.request.Request(OAUTH_TOKEN_URL, data=body, method="POST", headers={
-        "Content-Type": "application/json", "User-Agent": "ClawdPet/1.0"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        data = json.load(resp)
-    at = (data or {}).get("access_token")
-    if not at:
-        raise ValueError("no access_token in response")
-    exp_in = data.get("expires_in") or 0
-    auth = {
-        "access_token": at,
-        "refresh_token": data.get("refresh_token"),
-        "expires_at": int(time.time() * 1000 + exp_in * 1000),
-        "scope": data.get("scope"),
-    }
-    if not _store_clawd_auth(auth):
-        raise OSError("could not write " + str(CLAWD_AUTH_FILE))
-
-
-def fetch_api_usage() -> Optional[list]:
-    """Real utilization buckets straight from Anthropic, or None on failure."""
-    token = _get_access_token()
-    if not token:
-        return None
-    req = urllib.request.Request(USAGE_URL, headers={
-        "Authorization": f"Bearer {token}",
-        "anthropic-beta": "oauth-2025-04-20",
-        "User-Agent": "ClawdPet/1.0",
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.load(resp)
-    except (urllib.error.URLError, OSError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    buckets = []
-
-    # Preferred source: the "limits" array — it is what Claude's own usage
-    # popup renders, incl. model-scoped weekly limits ("Wöchentlich · Fable").
-    limits = data.get("limits")
-    if isinstance(limits, list):
-        for lim in limits:
-            if not isinstance(lim, dict):
-                continue
-            pct = lim.get("percent")
-            if not isinstance(pct, (int, float)):
-                continue
-            kind = str(lim.get("kind") or "")
-            scope = lim.get("scope") if isinstance(lim.get("scope"), dict) else {}
-            model = scope.get("model") if isinstance(scope.get("model"), dict) else {}
-            display = model.get("display_name")
-            if kind == "session":
-                key, label = "five_hour", tr("row_5h")
-            elif kind == "weekly_all":
-                key, label = "seven_day", tr("row_week_all")
-            elif isinstance(display, str) and display:
-                key, label = (f"weekly_{display.lower()}",
-                              tr("row_week_model", name=display))
-            else:
-                key = kind or "unknown"
-                label = (kind or "Limit").replace("_", " ").title()
-            buckets.append(UsageBucket(
-                key=key, label=label, pct=float(pct),
-                resets_at=_parse_iso_ts(lim.get("resets_at"))))
-
-    # Fallback: older top-level bucket format {name: {utilization, resets_at}}
-    if not buckets:
-        for key, val in data.items():
-            if not isinstance(val, dict):
-                continue
-            util = val.get("utilization")
-            if not isinstance(util, (int, float)):
-                continue
-            pct = float(util)
-            if isinstance(util, float) and 0.0 <= util <= 1.0:
-                pct *= 100.0      # some deployments report a 0..1 fraction
-            resets = val.get("resets_at")
-            if isinstance(resets, (int, float)):
-                resets_at = datetime.fromtimestamp(resets, tz=timezone.utc)
-            else:
-                resets_at = _parse_iso_ts(resets)
-            buckets.append(UsageBucket(key=key, label=bucket_label(key),
-                                       pct=pct, resets_at=resets_at))
-
-    order = {"five_hour": 0, "seven_day": 1}
-    buckets.sort(key=lambda b: order.get(b.key, 2))
-    return buckets or None
-
-
-_api_cache = {"buckets": None, "ts": 0.0, "next": 0.0, "fails": 0}   # throttle + back off
+# Clawd deliberately does NOT sign in to Anthropic and does not read or use any
+# OAuth token. Anthropic's Claude Code terms state they do not permit
+# third-party developers to offer Claude.ai login or to route requests through
+# Free, Pro, or Max plan credentials, and using a subscription token in any
+# other tool violates the Consumer Terms - enforceable without notice.
+# So every number here is reconstructed from the JSONL logs Claude Code already
+# writes locally, scaled by the calibrated budget. Nothing leaves the machine.
 
 
 def collect_usage(should_stop=None) -> UsageSnapshot:
-    """API first (exact numbers), local log estimate as fallback. The usage
-    endpoint is polled at most every API_OK_INTERVAL_S; between polls the last
-    buckets are reused so the log scan can run every couple of seconds without
-    hammering Anthropic. Repeated failures back off exponentially, and a single
-    blip keeps the last live reading (up to API_STALE_S) instead of flipping the
-    whole panel to the estimate."""
-    fetched_ok = False
-    if USE_API_USAGE:
-        now_s = time.time()
-        if now_s >= _api_cache["next"]:
-            fresh = fetch_api_usage()
-            if fresh:
-                _api_cache["buckets"] = fresh
-                _api_cache["ts"] = now_s
-                _api_cache["fails"] = 0
-                _api_cache["next"] = now_s + API_OK_INTERVAL_S
-                fetched_ok = True
-            else:
-                _api_cache["fails"] += 1
-                backoff = min(API_MAX_BACKOFF_S, API_RETRY_S * 2 ** (_api_cache["fails"] - 1))
-                _api_cache["next"] = now_s + backoff
-                if _api_cache["buckets"] is not None and now_s - _api_cache["ts"] > API_STALE_S:
-                    _api_cache["buckets"] = None       # last live reading too old — show the estimate
-        buckets = _api_cache["buckets"]
-        if buckets:
-            # keep the local per-model token counts as extra detail
-            snap = scan_usage(should_stop=should_stop)
-            if snap.error:
-                snap = UsageSnapshot(updated_at=datetime.now())
-            snap.error = ""
-            snap.source = "api"
-            snap.buckets = buckets
-            five = next((b for b in buckets if b.key == "five_hour"), buckets[0])
-            snap.pct = five.pct
-
-            # auto-calibrate only from a *freshly fetched* reading: pairing a
-            # cached (stale) percentage with the still-growing local token count
-            # would slowly skew the learned budget.
-            if fetched_ok:
-                budget_5h = weekly_budget = anchor = None
-                model_budgets = {}
-                for b in buckets:
-                    if b.key == "seven_day" and b.resets_at is not None:
-                        anchor = b.resets_at
-                    if b.pct < 3.0:
-                        continue          # too close to zero to divide reliably
-                    if b.key == "five_hour" and snap.weighted > 0:
-                        budget_5h = round(snap.weighted / (b.pct / 100.0))
-                    elif b.key == "seven_day" and snap.week_weighted > 0:
-                        weekly_budget = round(snap.week_weighted / (b.pct / 100.0))
-                    elif b.key.startswith("weekly_"):
-                        name = b.label.split("·")[-1].strip()
-                        wtok = snap.week_by_model_weighted.get(name, 0.0)
-                        if wtok > 0:
-                            model_budgets[name] = round(wtok / (b.pct / 100.0))
-                set_auto_calibration(budget_5h, anchor, weekly_budget,
-                                     model_budgets or None)
-            return snap
+    """The local log estimate - Clawd's only usage source."""
     return scan_usage(should_stop=should_stop)
 
 
@@ -1504,12 +1195,6 @@ STRINGS = {
         "menu_hooks_off": "Echtzeit-Hooks deaktivieren",
         "menu_cal": "Limit kalibrieren …",
         "menu_cal_reset": "Kalibrierung zurücksetzen",
-        "menu_clawd_login": "Clawd-Login einrichten …",
-        "clawd_login_title": "Clawd-Login",
-        "clawd_login_prompt": "1. Im Browser einloggen und „Authorize“ klicken.\n2. Den angezeigten Code (xxx#yyy) hier einfügen:",
-        "clawd_login_ok": "Clawd-Login eingerichtet — Live-Werte sind aktiv.",
-        "clawd_login_fail": "Login fehlgeschlagen: {e}",
-        "clawd_login_nocode": "Kein Code eingegeben.",
         "menu_lang": "Language: English",
         "menu_show": "Clawd anzeigen/verstecken",
         "menu_quit": "Beenden",
@@ -1603,12 +1288,6 @@ STRINGS = {
         "menu_hooks_off": "Disable real-time hooks",
         "menu_cal": "Calibrate limit …",
         "menu_cal_reset": "Reset calibration",
-        "menu_clawd_login": "Set up Clawd login …",
-        "clawd_login_title": "Clawd login",
-        "clawd_login_prompt": "1. Sign in in the browser and click \"Authorize\".\n2. Paste the code shown (xxx#yyy) here:",
-        "clawd_login_ok": "Clawd login set up — live values are active.",
-        "clawd_login_fail": "Login failed: {e}",
-        "clawd_login_nocode": "No code entered.",
         "menu_lang": "Sprache: Deutsch",
         "menu_show": "Show/hide Clawd",
         "menu_quit": "Quit",
@@ -2168,16 +1847,13 @@ class PetWidget(QWidget):
     # -------------------------------------------------- state / painting
 
     def set_snapshot(self, snap: UsageSnapshot):
-        idle = ((snap.source == "logs" and snap.entries == 0)
-                or (snap.source == "api" and snap.pct <= 0))
+        idle = snap.entries == 0
         self.pct = snap.pct
         self._quota_mood = ("sleep" if (not snap.error and idle)
                             else mood_for_pct(snap.pct))
         self._update_mood()
         if snap.error:
             self.setToolTip(snap.error)
-        elif snap.source == "api":
-            self.setToolTip(tr("tooltip_api", p=fmt_pct_de(snap.pct)))
         else:
             self.setToolTip(tr("tooltip_est", p=fmt_pct_de(snap.pct),
                                n=fmt_de(snap.total)))
@@ -2718,18 +2394,6 @@ class PanelWidget(QWidget):
 
         if snap.error:
             self.detail_label.setText(snap.error)
-        elif snap.source == "api":
-            for b in snap.buckets:
-                self._animate_row(self._ensure_row(b.key, b.label), b.pct)
-            self._show_only({b.key for b in snap.buckets})
-            models = sorted(
-                ((n, t) for n, t in snap.by_model.items() if n != "System" and t > 0),
-                key=lambda kv: -kv[1])
-            if models:
-                parts = " · ".join(f"{n} {fmt_de(t)}" for n, t in models)
-                self.detail_label.setText(tr("detail_local", parts=parts))
-            else:
-                self.detail_label.setText("")
         else:
             row = self._ensure_row("estimate", tr("row_5h"))
             self._animate_row(row, snap.pct)
@@ -2784,7 +2448,7 @@ class PanelWidget(QWidget):
         self.history_chart.set_series(self._history)
         self.history_title.setVisible(len(self._history) >= 2)
         if snap.updated_at:
-            src = tr("src_live") if snap.source == "api" else tr("src_local")
+            src = tr("src_local")
             self.updated_label.setText(
                 tr("updated", t=snap.updated_at.strftime("%H:%M:%S"), src=src))
         self._refresh_countdown()
@@ -2793,11 +2457,7 @@ class PanelWidget(QWidget):
     def _update_forecast(self, snap: UsageSnapshot):
         """Burn-rate line: projected time of hitting the 5-hour limit."""
         reset_at = None
-        if snap.source == "api":
-            for b in snap.buckets:
-                if b.key == "five_hour":
-                    reset_at = b.resets_at
-        elif snap.oldest is not None:
+        if snap.oldest is not None:
             reset_at = snap.oldest + timedelta(hours=WINDOW_HOURS)
         eta = snap.burn_eta
         if eta is None or snap.error or snap.pct >= 100.0:
@@ -2814,20 +2474,14 @@ class PanelWidget(QWidget):
         snap = self._snap
         if snap is None:
             return
-        if snap.source == "api":
-            for b in snap.buckets:
-                row = self._rows.get(b.key)
-                if row is not None:
-                    row["reset"].setText(_fmt_reset(b.resets_at))
+        row = self._rows.get("estimate")
+        if row is None:
+            return
+        if snap.oldest is None:
+            row["reset"].setText("")
         else:
-            row = self._rows.get("estimate")
-            if row is None:
-                return
-            if snap.oldest is None:
-                row["reset"].setText("")
-            else:
-                row["reset"].setText(
-                    _fmt_reset(snap.oldest + timedelta(hours=WINDOW_HOURS)))
+            row["reset"].setText(
+                _fmt_reset(snap.oldest + timedelta(hours=WINDOW_HOURS)))
 
     # -------------------------------------------------- show / hide
 
@@ -3199,10 +2853,6 @@ class ClawdApp:
             act_reset.triggered.connect(self.reset_calibration)
             menu.addAction(act_reset)
 
-        act_login = QAction(tr("menu_clawd_login"), menu)
-        act_login.triggered.connect(self.setup_clawd_login)
-        menu.addAction(act_login)
-
         act_lang = QAction(tr("menu_lang"), menu)
         act_lang.triggered.connect(self.toggle_language)
         menu.addAction(act_lang)
@@ -3275,7 +2925,7 @@ class ClawdApp:
             snap.burn_eta = burn_eta(samples)
             self._notify_transition(snap.source, snap.pct)
             self.history.add(now, snap.pct)
-        cal = auto_calibration()          # persist budgets learned from live syncs
+        cal = auto_calibration()          # keep the calibrated budgets on disk
         if cal["budget_5h"]:
             self.settings.setValue("auto_budget_5h", cal["budget_5h"])
         if cal["weekly_budget"]:
@@ -3534,10 +3184,6 @@ class ClawdApp:
         tokens we counted in the same window, the budget is a simple ratio.
         """
         snap = self.snapshot
-        if snap.source == "api":
-            QMessageBox.information(
-                None, tr("cal_api_title"), tr("cal_api_text"))
-            return
         if snap.total <= 0:
             QMessageBox.warning(
                 None, tr("cal_nodata_title"), tr("cal_nodata_text"))
@@ -3563,34 +3209,6 @@ class ClawdApp:
         set_max_tokens_override(None)
         self._rebuild_tray_menu()
         self.refresh()
-
-    def setup_clawd_login(self):
-        """One-time login that gives Clawd its OWN independent usage token, so
-        live values keep working (auto-refreshed) without touching Claude Code's
-        credential store. Opens the browser, then takes the pasted code."""
-        import webbrowser
-        url, verifier, redirect = _clawd_build_authorize_url()
-        try:
-            webbrowser.open(url)
-        except Exception:
-            pass
-        raw, ok = QInputDialog.getText(
-            None, tr("clawd_login_title"),
-            tr("clawd_login_prompt") + "\n\n" + url)
-        if not ok:
-            return
-        if not raw.strip():
-            QMessageBox.warning(None, tr("clawd_login_title"), tr("clawd_login_nocode"))
-            return
-        try:
-            _clawd_exchange_code(raw, verifier, redirect)
-        except Exception as e:      # noqa: BLE001 — surface any failure to the user
-            QMessageBox.warning(
-                None, tr("clawd_login_title"), tr("clawd_login_fail", e=str(e)[:200]))
-            return
-        _api_cache["next"] = 0.0    # force an immediate live fetch with the new token
-        self.refresh()
-        QMessageBox.information(None, tr("clawd_login_title"), tr("clawd_login_ok"))
 
     # -------------------------------------------------- position memory
 
@@ -3652,26 +3270,28 @@ def run_selftest() -> int:
     panel.adjustSize()
     assert panel.height() > 100, "panel layout collapsed"
 
-    api_snap = UsageSnapshot(updated_at=datetime.now(), source="api", pct=65.0)
-    api_snap.buckets = [
-        UsageBucket("five_hour", "5-Stunden-Limit", 65.0,
-                    datetime.now(timezone.utc) + timedelta(hours=3, minutes=53)),
-        UsageBucket("seven_day", "Wöchentlich · alle Modelle", 28.0,
-                    datetime.now(timezone.utc) + timedelta(days=5)),
-        UsageBucket("seven_day_fable", "Wöchentlich · Fable", 52.0,
-                    datetime.now(timezone.utc) + timedelta(days=5)),
-    ]
-    panel.update_snapshot(api_snap)
-    assert set(panel._rows) >= {"five_hour", "seven_day", "seven_day_fable"}
-    print(f"[selftest] api-mode panel rows: {sorted(panel._rows)}")
+    # Compliance guard: Clawd must never sign in, refresh a token, or read a
+    # credential store. Anthropic forbids third-party use of subscription OAuth,
+    # so these code-level markers must never come back (prose may mention OAuth).
+    _own = Path(__file__)
+    _src = _own.read_text(encoding="utf-8") if _own.is_file() else ""
+    if _src:
+        # split so this guard's own literals do not trip it
+        for _a, _b in (("api/oauth", "/usage"), ("grant", "_type"),
+                       (".credentials", ".json"), ("Bearer", " "),
+                       ("oauth/", "authorize"), ("code_", "verifier")):
+            _forbidden = _a + _b
+            assert _forbidden not in _src, \
+                f"credential surface reintroduced: {_forbidden}"
+        print("[selftest] local-only: no OAuth/credential surface OK")
 
     # Child geometry only exists once the widget has been shown — do it
     # far off-screen so the check runs unattended.
     panel.move(-4000, -4000)
     panel.show()
     app.processEvents()
-    assert not panel._rows["estimate"]["bar"].isVisible(), \
-        "log-mode row still visible in api mode"
+    assert panel._rows["estimate"]["bar"].isVisible(), \
+        "the 5-hour estimate row must be visible in local-only mode"
 
     # let the progress-bar animations settle so the preview shows real bars
     deadline = time.monotonic() + 1.2
@@ -3695,19 +3315,15 @@ def run_selftest() -> int:
     assert panel.height() > 200, f"panel too short ({panel.height()}px) — rows squashed"
 
     here = Path(__file__).resolve().parent
-    panel.grab().save(str(here / "panel_preview_api.png"))
-
-    panel.update_snapshot(snap)          # back to log mode
+    panel.update_snapshot(snap)
     app.processEvents()
-    assert not panel._rows["five_hour"]["bar"].isVisible(), \
-        "api row still visible in log mode"
     deadline = time.monotonic() + 1.2
     while time.monotonic() < deadline:
         app.processEvents()
     panel.grab().save(str(here / "panel_preview_logs.png"))
-    print(f"[selftest] log-mode panel: {panel.width()}x{panel.height()}")
+    print(f"[selftest] local panel: {panel.width()}x{panel.height()}")
     panel.hide()
-    print("[selftest] previews written: panel_preview_api.png, panel_preview_logs.png")
+    print("[selftest] preview written: panel_preview_logs.png")
 
     # calibration: budget derived from Claude's own percentage
     assert effective_max_tokens() == MAX_TOKENS and not is_calibrated()

@@ -72,6 +72,13 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
   credentials in other tools, so Clawd works purely from the logs Claude Code
   already writes on your disk. A self-test enforces that no credential code path
   can come back.
+- **Real costs, officially (optional):** tray menu → "Enable real costs
+  (telemetry)" points Claude Code's own OpenTelemetry export at a localhost-only
+  endpoint inside Clawd, so the panel shows the **measured** cost in USD instead
+  of an estimate. This is Anthropic's documented monitoring interface — no
+  credentials involved. Clawd asks before it touches `settings.json` and keeps a
+  `.clawd-bak` backup. The telemetry stream also carries your email address and
+  prompt text; Clawd reads only the numbers it needs and never stores any of it.
 - **Self-calibrating:** Anthropic does not publish the actual token quotas, so
   right-click → "Calibrate limit …" and type the percentage Claude's own `/usage`
   popup shows once — the app derives your real budget from it, stores it, and

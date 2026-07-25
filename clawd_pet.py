@@ -33,6 +33,7 @@ Platform notes
 
 import bisect
 import functools
+import gzip
 import json
 import math
 import os
@@ -40,12 +41,14 @@ import random
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
 import webbrowser
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
 
@@ -172,7 +175,7 @@ HOOK_EVENTS = ["PreToolUse", "Notification", "Stop", "SessionStart"]
 
 ORG_NAME = "ClawdPet"
 APP_NAME = "Clawd"
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.10.0"
 
 # --- Burn-rate forecast + threshold notifications ----------------------------
 BURN_LOOKBACK_S = 3600      # forecast fits over at most the last hour
@@ -220,6 +223,8 @@ class UsageSnapshot:
     entries: int = 0
     error: str = ""
     source: str = "logs"                          # always "logs" — the only source
+    cost_usd: float = 0.0                         # real window cost, if telemetry runs
+    cost_live: bool = False                       # True while telemetry is feeding us
     by_model: dict = field(default_factory=dict)  # model id -> input+output tokens
     newest_file: str = ""                         # most recently written session log
     week_total: int = 0                           # input+output in the weekly window
@@ -554,8 +559,16 @@ class ScanThread(QThread):
 
 
 def collect_usage(should_stop=None) -> UsageSnapshot:
-    """The local log estimate - Clawd's only usage source."""
-    return scan_usage(should_stop=should_stop)
+    """The local log estimate, enriched with Claude Code's own telemetry when
+    the user has pointed it at us. Telemetry only *adds* the real cost — the
+    percentages keep coming from the logs, so everything still works without
+    it."""
+    snap = scan_usage(should_stop=should_stop)
+    if _OTLP_STORE.fresh() and snap.oldest is not None:
+        window = _OTLP_STORE.window(snap.oldest.timestamp())
+        snap.cost_usd = window["cost_usd"]
+        snap.cost_live = snap.cost_usd > 0.0
+    return snap
 
 
 def _fmt_reset(resets_at: Optional[datetime]) -> str:
@@ -859,6 +872,416 @@ def unregister_hooks(settings_path: Path) -> bool:
             hooks[event] = kept
             changed = True
     return changed and _write_settings(settings_path, data)
+
+
+# ======================================================================
+#  Optional: Claude Code's own OpenTelemetry feed (opt-in)
+# ======================================================================
+# With CLAUDE_CODE_ENABLE_TELEMETRY=1 Claude Code exports its own metrics and
+# events over OTLP/HTTP (docs: code.claude.com/docs/en/monitoring-usage). That
+# feed carries the REAL cost in USD and exact per-model token counts, so where
+# it is available Clawd no longer has to estimate from weights — and it is an
+# officially documented interface, unlike anything account-credential based.
+#
+# Verified against a live session: protocol "http/json" POSTs plain, ungzipped
+# JSON to /v1/metrics and /v1/logs. The payload also carries user.email, account
+# ids and prompt text; Clawd reads only the few numbers it needs, keeps them in
+# memory, and never writes any of it to disk.
+
+OTLP_HOST = "127.0.0.1"           # localhost only — never a public interface
+OTLP_PORT = 4318                  # the OTLP/HTTP default port
+OTLP_STALE_S = 900.0              # telemetry older than this counts as "quiet"
+OTLP_KEEP_S = 8 * 86400           # bound the increment log to the weekly window
+OTLP_MAX_BODY = 2 * 1024 * 1024   # a real export is a few KB — refuse the rest
+OTLP_MAX_SERIES = 5000            # cap the counter table an exporter can grow
+OTLP_FUTURE_S = 300.0             # tolerate this much clock skew, no more
+OTLP_TIMEOUT_S = 10               # drop a stalled connection instead of pinning it
+OTLP_MAX_INFLIGHT = 8             # requests served at once; the rest get 503
+OTLP_ENV = {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_LOGS_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://{OTLP_HOST}:{OTLP_PORT}",
+    "OTEL_METRIC_EXPORT_INTERVAL": "10000",   # 10 s instead of the 60 s default
+    # be explicit: cumulative counters are what the delta logic below expects
+    "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
+}
+
+
+def telemetry_enabled(settings_path: Path) -> bool:
+    data = _load_settings(settings_path)
+    if not isinstance(data, dict):
+        return False
+    env = data.get("env")
+    return (isinstance(env, dict)
+            and env.get("CLAUDE_CODE_ENABLE_TELEMETRY") == "1"
+            and env.get("OTEL_EXPORTER_OTLP_ENDPOINT") == OTLP_ENV[
+                "OTEL_EXPORTER_OTLP_ENDPOINT"])
+
+
+def enable_telemetry(settings_path: Path) -> bool:
+    """Point Claude Code's telemetry at Clawd (settings.json is backed up)."""
+    data = _load_settings(settings_path)
+    if not isinstance(data, dict):
+        return False
+    env = data.setdefault("env", {})
+    if not isinstance(env, dict):
+        return False
+    env.update(OTLP_ENV)
+    return _write_settings(settings_path, data)
+
+
+def foreign_telemetry(settings_path: Path) -> str:
+    """A telemetry endpoint someone else configured, or "" if there is none.
+
+    Overwriting it would silently redirect another collector's data, so the app
+    asks instead of clobbering it."""
+    data = _load_settings(settings_path)
+    env = data.get("env") if isinstance(data, dict) else None
+    if not isinstance(env, dict):
+        return ""
+    endpoint = env.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if isinstance(endpoint, str) and endpoint and endpoint != OTLP_ENV[
+            "OTEL_EXPORTER_OTLP_ENDPOINT"]:
+        return endpoint
+    return ""
+
+
+def disable_telemetry(settings_path: Path) -> bool:
+    data = _load_settings(settings_path)
+    if not isinstance(data, dict):
+        return False
+    env = data.get("env")
+    if not isinstance(env, dict):
+        return False
+    # only take back the keys still holding the values Clawd wrote, so a value
+    # the user changed by hand survives
+    removed = [k for k, v in OTLP_ENV.items() if env.get(k) == v]
+    for key in removed:
+        env.pop(key, None)
+    if not env:
+        data.pop("env", None)
+    return bool(removed) and _write_settings(settings_path, data)
+
+
+def _as_list(value):
+    """OTLP containers, but tolerant of anything a stray POST might send."""
+    return value if isinstance(value, list) else []
+
+
+def _otlp_scalar(value: dict):
+    """One OTLP AnyValue -> a Python scalar (ints arrive as strings)."""
+    for key in ("stringValue", "intValue", "doubleValue", "boolValue"):
+        if key in value:
+            return value[key]
+    return None
+
+
+def _otlp_attrs(items) -> dict:
+    return {a.get("key"): _otlp_scalar(a.get("value") or {})
+            for a in items or [] if a.get("key")}
+
+
+def _otlp_amount(point: dict) -> Optional[float]:
+    for key in ("asDouble", "asInt"):
+        if key in point:
+            try:
+                return float(point[key])
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _otlp_ts(record: dict) -> float:
+    for key in ("timeUnixNano", "observedTimeUnixNano"):
+        try:
+            nanos = int(record.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if nanos > 0:
+            return nanos / 1e9
+    return time.time()
+
+
+class OtlpStore:
+    """Thread-safe view of the telemetry Claude Code pushes to us.
+
+    cost.usage and token.usage are cumulative counters per session, so we keep
+    the last value of every series and bank each increment with its timestamp.
+    Summing the increments inside a time span then gives the real cost of that
+    span — exactly what the 5-hour and weekly rows need.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._last = {}          # series key -> last cumulative value
+        self._deltas = []        # (ts, metric, model, token type, amount)
+        self.last_seen = 0.0     # newest telemetry timestamp accepted
+        self.last_error = None   # (ts, status_code, model) of the newest api_error
+        self.bind_error = ""     # set when the receiver could not open the port
+
+    # -------------------------------------------------- ingest
+    def ingest(self, path: str, body: dict) -> None:
+        if path.endswith("/v1/metrics"):
+            self._ingest_metrics(body)
+        elif path.endswith("/v1/logs"):
+            self._ingest_logs(body)
+
+    def _ingest_metrics(self, body: dict) -> None:
+        if not isinstance(body, dict):
+            return
+        rows = []
+        for res in _as_list(body.get("resourceMetrics")):
+            if not isinstance(res, dict):
+                continue
+            # session.id can live on the resource rather than the data point;
+            # without it every concurrent session would collapse into one series
+            base = _otlp_attrs((res.get("resource") or {}).get("attributes"))
+            for scope in _as_list(res.get("scopeMetrics")):
+                if not isinstance(scope, dict):
+                    continue
+                for metric in _as_list(scope.get("metrics")):
+                    if not isinstance(metric, dict):
+                        continue
+                    if metric.get("name") not in ("claude_code.cost.usage",
+                                                  "claude_code.token.usage"):
+                        continue
+                    series = metric.get("sum") or metric.get("gauge") or {}
+                    if not isinstance(series, dict):
+                        continue
+                    # temporality 1 = DELTA: each export is already an increment
+                    is_delta = series.get("aggregationTemporality") == 1
+                    for point in _as_list(series.get("dataPoints")):
+                        if not isinstance(point, dict):
+                            continue
+                        amount = _otlp_amount(point)
+                        if amount is None:
+                            continue
+                        attrs = dict(base)
+                        attrs.update(_otlp_attrs(point.get("attributes")))
+                        rows.append((metric["name"], attrs, amount,
+                                     _otlp_ts(point), is_delta))
+        if not rows:
+            return
+        now = time.time()
+        with self._lock:
+            for name, attrs, amount, ts, is_delta in rows:
+                if ts > now + OTLP_FUTURE_S or ts < now - OTLP_KEEP_S:
+                    continue          # clock skew must not poison the window
+                key = (name, attrs.get("session.id"), attrs.get("model"),
+                       attrs.get("type"))
+                # freshness means "the exporter is talking to us", which is true
+                # even for an idle session reporting an unchanged counter
+                self.last_seen = max(self.last_seen, ts)
+                if is_delta:
+                    delta = amount
+                else:
+                    previous = self._last.get(key)
+                    self._last[key] = (amount, ts)
+                    if previous is None:
+                        continue      # baseline only — never bank a session total
+                    delta = amount - previous[0]
+                    if delta < 0:
+                        delta = amount        # the counter restarted
+                if delta <= 0:
+                    continue
+                self._deltas.append((ts, name, str(attrs.get("model") or "?"),
+                                     str(attrs.get("type") or ""), delta))
+            self._prune(now)
+
+    def _prune(self, now: float) -> None:
+        """Bound both tables. The caller holds the lock."""
+        cutoff = now - OTLP_KEEP_S
+        if self._deltas and self._deltas[0][0] < cutoff:
+            self._deltas = [d for d in self._deltas if d[0] >= cutoff]
+        for key in [k for k, v in self._last.items() if v[1] < cutoff]:
+            del self._last[key]
+        if len(self._last) > OTLP_MAX_SERIES:      # keep the most recent series
+            newest = sorted(self._last.items(), key=lambda kv: -kv[1][1])
+            self._last = dict(newest[:OTLP_MAX_SERIES])
+
+    def reset(self) -> None:
+        """Forget everything — used when the user opts back out."""
+        with self._lock:
+            self._last.clear()
+            self._deltas.clear()
+            self.last_seen = 0.0
+            self.last_error = None
+
+    def _ingest_logs(self, body: dict) -> None:
+        """Only the handful of event fields we react to — never prompt text."""
+        if not isinstance(body, dict):
+            return
+        newest = None
+        now = time.time()
+        for res in _as_list(body.get("resourceLogs")):
+            if not isinstance(res, dict):
+                continue
+            for scope in _as_list(res.get("scopeLogs")):
+                if not isinstance(scope, dict):
+                    continue
+                for record in _as_list(scope.get("logRecords")):
+                    if not isinstance(record, dict):
+                        continue
+                    attrs = _otlp_attrs(record.get("attributes"))
+                    if attrs.get("event.name") != "api_error":
+                        continue
+                    ts = _otlp_ts(record)
+                    if ts > now + OTLP_FUTURE_S:
+                        continue
+                    newest = (ts, attrs.get("status_code"),
+                              str(attrs.get("model") or ""))
+        if newest is not None:
+            with self._lock:
+                self.last_error = newest
+                self.last_seen = max(self.last_seen, newest[0])
+
+    # -------------------------------------------------- read
+    def fresh(self) -> bool:
+        """True while Claude Code is actively feeding us."""
+        with self._lock:
+            return (self.last_seen > 0.0
+                    and time.time() - self.last_seen < OTLP_STALE_S)
+
+    def window(self, since_ts: float) -> dict:
+        cost = 0.0
+        tokens = {}
+        by_model = {}
+        with self._lock:
+            for ts, name, model, kind, amount in self._deltas:
+                if ts < since_ts:
+                    continue
+                if name == "claude_code.cost.usage":
+                    cost += amount
+                    by_model[model] = by_model.get(model, 0.0) + amount
+                else:
+                    tokens[kind] = tokens.get(kind, 0.0) + amount
+        return {"cost_usd": cost, "tokens": tokens, "cost_by_model": by_model}
+
+
+_OTLP_STORE = OtlpStore()
+
+
+class _OtlpHttpServer(ThreadingHTTPServer):
+    """On Windows SO_REUSEADDR lets a second process bind a port that is already
+    being listened on, which would silently hijack a real collector running on
+    4318. Refuse the bind instead so we can warn the user."""
+
+    allow_reuse_address = False
+    daemon_threads = True          # never let a stuck handler block shutdown
+
+
+class OtlpReceiver(QThread):
+    """A localhost-only OTLP/HTTP endpoint Claude Code can export to."""
+
+    def __init__(self, store: OtlpStore):
+        super().__init__()
+        self._store = store
+        self._server = None
+
+    def bind(self) -> bool:
+        """Open the socket on the *calling* thread, so a taken port is reported
+        immediately instead of racing the worker thread's start-up."""
+        try:
+            self._server = _OtlpHttpServer((OTLP_HOST, OTLP_PORT),
+                                           self._handler())
+        except OSError as exc:          # port already taken by a real collector
+            self._store.bind_error = str(exc)
+            self._server = None
+            return False
+        return True
+
+    def run(self):
+        if self._server is not None:
+            self._server.serve_forever(poll_interval=0.5)
+
+    def _handler(self):
+        store = self._store
+        inflight = threading.Semaphore(OTLP_MAX_INFLIGHT)
+
+        class Handler(BaseHTTPRequestHandler):
+            # HTTP/1.0 closes every connection after the answer, so an idle or
+            # stalled client can never pin one of our threads; the exporter
+            # simply reconnects on its next interval.
+            protocol_version = "HTTP/1.0"
+            timeout = OTLP_TIMEOUT_S
+
+            def _reply(self, code: int):
+                self.close_connection = True
+                try:
+                    self.send_response(code)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", "2")
+                    self.end_headers()
+                    self.wfile.write(b"{}")
+                except OSError:
+                    pass            # client vanished mid-answer
+            def do_POST(self):      # noqa: N802 — BaseHTTPRequestHandler API
+                if self.path not in ("/v1/metrics", "/v1/logs"):
+                    self._reply(404)
+                    return
+                # Require the headers a real exporter sends. A cross-origin page
+                # cannot set Host, and application/json forces a preflight we
+                # never answer, so drive-by POSTs cannot reach the parser.
+                if (self.headers.get("Host") or "") not in (
+                        f"{OTLP_HOST}:{OTLP_PORT}", f"localhost:{OTLP_PORT}"):
+                    self._reply(403)
+                    return
+                if not (self.headers.get("Content-Type") or "").startswith(
+                        "application/json"):
+                    self._reply(415)
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    self._reply(400)
+                    return
+                if length < 0 or length > OTLP_MAX_BODY:
+                    self._reply(413)    # never pre-allocate an attacker's number
+                    return
+                if not inflight.acquire(blocking=False):
+                    self._reply(503)    # bound the work one client can create
+                    return
+                try:
+                    raw = b""
+                    while len(raw) < length:
+                        chunk = self.rfile.read(min(65536, length - len(raw)))
+                        if not chunk:
+                            break       # short body — use whatever arrived
+                        raw += chunk
+                    if (self.headers.get("Content-Encoding") or "").lower() == "gzip":
+                        try:
+                            raw = gzip.decompress(raw)
+                        except (OSError, EOFError):
+                            raw = b""
+                    try:
+                        store.ingest(self.path, json.loads(raw.decode("utf-8")))
+                    except Exception:   # noqa: BLE001 — a malformed export must
+                        pass            # never kill this thread or the pet
+                finally:
+                    inflight.release()
+                self._reply(200)
+
+            def log_message(self, *args):
+                pass                # keep stdout clean in a windowed build
+
+        return Handler
+
+    def stop(self):
+        server = self._server
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+            self._server = None
+
+
+def fmt_usd(value: float) -> str:
+    """Money in the active locale's notation."""
+    text = f"{value:,.2f}"
+    if language() == "de":       # 1,234.56 -> 1.234,56
+        text = text.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+    return "$" + text
 
 
 def mood_for_pct(pct: float) -> str:
@@ -1193,6 +1616,26 @@ STRINGS = {
         "menu_quiet_off": "Sprechblasen ausblenden",
         "menu_hooks_on": "Echtzeit-Hooks aktivieren (Beta)",
         "menu_hooks_off": "Echtzeit-Hooks deaktivieren",
+        "menu_otlp_on": "Echte Kosten aktivieren (Telemetrie)",
+        "menu_otlp_off": "Telemetrie deaktivieren",
+        "detail_cost": "Kosten: {usd} (gemessen)",
+        "otlp_title": "Claude-Code-Telemetrie",
+        "otlp_ask": "Claude Code kann seine eigene Telemetrie an Clawd senden. "
+                    "Dann zeigt Clawd die <b>echten Kosten in USD</b> statt einer "
+                    "Schätzung.<br><br>Dazu trägt Clawd Umgebungsvariablen in "
+                    "<b>{f}</b> ein (Backup wird angelegt). Alles bleibt lokal: "
+                    "Claude Code sendet nur an {ep} auf deinem Rechner, und Clawd "
+                    "speichert weder E-Mail-Adresse noch Prompt-Texte."
+                    "<br><br>Jetzt einrichten?",
+        "otlp_done": "Telemetrie eingerichtet. Ab der nächsten Claude-Code-Session "
+                     "zeigt Clawd die echten Kosten.\n\nBackup: {f}",
+        "otlp_fail": "Konnte {f} nicht schreiben — Telemetrie nicht eingerichtet.",
+        "otlp_port": "Port {p} ist belegt (läuft dort schon ein OpenTelemetry-"
+                     "Collector?). Clawd empfängt keine Telemetrie.",
+        "otlp_foreign": "In den Claude-Code-Einstellungen ist bereits ein anderer "
+                        "Telemetrie-Endpunkt eingetragen:\n\n{ep}\n\nClawd "
+                        "überschreibt das nicht. Entferne den Eintrag zuerst, "
+                        "wenn Clawd die Kosten messen soll.",
         "menu_cal": "Limit kalibrieren …",
         "menu_cal_reset": "Kalibrierung zurücksetzen",
         "menu_lang": "Language: English",
@@ -1286,6 +1729,24 @@ STRINGS = {
         "menu_quiet_off": "Hide speech bubbles",
         "menu_hooks_on": "Enable real-time hooks (beta)",
         "menu_hooks_off": "Disable real-time hooks",
+        "menu_otlp_on": "Enable real costs (telemetry)",
+        "menu_otlp_off": "Disable telemetry",
+        "detail_cost": "Cost: {usd} (measured)",
+        "otlp_title": "Claude Code telemetry",
+        "otlp_ask": "Claude Code can send its own telemetry to Clawd, which then "
+                    "shows the <b>real cost in USD</b> instead of an estimate."
+                    "<br><br>Clawd would add environment variables to <b>{f}</b> "
+                    "(a backup is kept). Everything stays local: Claude Code only "
+                    "posts to {ep} on this machine, and Clawd stores neither your "
+                    "email address nor any prompt text.<br><br>Set this up now?",
+        "otlp_done": "Telemetry is set up. From the next Claude Code session on, "
+                     "Clawd shows the real cost.\n\nBackup: {f}",
+        "otlp_fail": "Could not write {f} — telemetry was not set up.",
+        "otlp_port": "Port {p} is already in use (an OpenTelemetry collector "
+                     "running there?). Clawd receives no telemetry.",
+        "otlp_foreign": "Claude Code's settings already point telemetry somewhere "
+                        "else:\n\n{ep}\n\nClawd will not overwrite that. Remove "
+                        "the entry first if you want Clawd to measure costs.",
         "menu_cal": "Calibrate limit …",
         "menu_cal_reset": "Reset calibration",
         "menu_lang": "Sprache: Deutsch",
@@ -2441,8 +2902,10 @@ class PanelWidget(QWidget):
             hint = (tr("hint_manual") if is_calibrated()
                     else tr("hint_auto") if auto_budget_active()
                     else tr("hint_placeholder"))
-            self.detail_label.setText(
-                tr("detail_used", n=fmt_de(snap.total), hint=hint))
+            detail = tr("detail_used", n=fmt_de(snap.total), hint=hint)
+            if snap.cost_live:      # telemetry knows the real price of this window
+                detail += "  ·  " + tr("detail_cost", usd=fmt_usd(snap.cost_usd))
+            self.detail_label.setText(detail)
         self.detail_label.setVisible(bool(self.detail_label.text()))
         self._update_forecast(snap)
         self.history_chart.set_series(self._history)
@@ -2730,6 +3193,7 @@ class ClawdApp:
             self._udp.readyRead.connect(self._read_hook_datagrams)
 
         self._scan_thread: Optional[ScanThread] = None
+        self._otlp = None            # OtlpReceiver once telemetry is opted into
         self._scan_timer = QTimer()
         self._scan_timer.setInterval(SCAN_INTERVAL_MS)
         self._scan_timer.timeout.connect(self.refresh)
@@ -2756,6 +3220,8 @@ class ClawdApp:
         self.pet.show()
         self._scan_timer.start()
         self._activity_timer.start()
+        if telemetry_enabled(CLAUDE_SETTINGS_FILE):
+            self._start_otlp()       # the user opted in on an earlier run
         self.refresh()
         if self.check_updates:
             self._begin_update_check()
@@ -2763,6 +3229,7 @@ class ClawdApp:
 
     def quit(self):
         self.save_position()
+        self._stop_otlp()            # let go of the port before the app dies
         self._scan_timer.stop()
         self._activity_timer.stop()
         self._update_timer.stop()
@@ -2844,6 +3311,14 @@ class ClawdApp:
             act_hooks = QAction(tr("menu_hooks_on"), menu)
             act_hooks.triggered.connect(self.enable_hooks)
         menu.addAction(act_hooks)
+
+        if telemetry_enabled(CLAUDE_SETTINGS_FILE):
+            act_otlp = QAction(tr("menu_otlp_off"), menu)
+            act_otlp.triggered.connect(self.disable_otlp)
+        else:
+            act_otlp = QAction(tr("menu_otlp_on"), menu)
+            act_otlp.triggered.connect(self.enable_otlp)
+        menu.addAction(act_otlp)
 
         act_cal = QAction(tr("menu_cal"), menu)
         act_cal.triggered.connect(self.calibrate)
@@ -3172,6 +3647,67 @@ class ClawdApp:
 
     def disable_hooks(self):
         unregister_hooks(CLAUDE_SETTINGS_FILE)
+        self._rebuild_tray_menu()
+
+    # -------------------------------------------------- telemetry (opt-in)
+
+    def _start_otlp(self) -> bool:
+        """Open the localhost OTLP endpoint Claude Code exports to."""
+        if self._otlp is not None and self._otlp.isRunning():
+            return True
+        _OTLP_STORE.bind_error = ""
+        receiver = OtlpReceiver(_OTLP_STORE)
+        if not receiver.bind():          # port taken — say so instead of pretending
+            return False
+        receiver.start()
+        self._otlp = receiver
+        return True
+
+    def enable_otlp(self):
+        """Writing to the user's Claude Code settings needs explicit consent."""
+        other = foreign_telemetry(CLAUDE_SETTINGS_FILE)
+        if other:
+            QMessageBox.warning(None, tr("otlp_title"),
+                                tr("otlp_foreign", ep=other))
+            return
+        if QMessageBox.question(
+                None, tr("otlp_title"),
+                tr("otlp_ask", f=str(CLAUDE_SETTINGS_FILE),
+                   ep=OTLP_ENV["OTEL_EXPORTER_OTLP_ENDPOINT"]),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No) != QMessageBox.Yes:
+            return
+        # Bind BEFORE touching settings.json: if something else owns the port we
+        # must not point Claude Code's telemetry — which carries prompt text and
+        # the account email — at that other process.
+        if not self._start_otlp():
+            QMessageBox.warning(None, tr("otlp_title"),
+                                tr("otlp_port", p=OTLP_PORT))
+            return
+        if not enable_telemetry(CLAUDE_SETTINGS_FILE):
+            self._stop_otlp()          # give the port back, stay opted out
+            QMessageBox.warning(None, tr("otlp_title"),
+                                tr("otlp_fail", f=str(CLAUDE_SETTINGS_FILE)))
+            return
+        self._rebuild_tray_menu()
+        QMessageBox.information(
+            None, tr("otlp_title"),
+            tr("otlp_done", f=f"{CLAUDE_SETTINGS_FILE.name}.clawd-bak"))
+
+    def _stop_otlp(self):
+        receiver = self._otlp
+        if receiver is not None:
+            receiver.stop()
+            receiver.wait(3000)
+            self._otlp = None
+
+    def disable_otlp(self):
+        if not disable_telemetry(CLAUDE_SETTINGS_FILE):
+            QMessageBox.warning(None, tr("otlp_title"),
+                                tr("otlp_fail", f=str(CLAUDE_SETTINGS_FILE)))
+            return                     # keep receiving rather than lie in the menu
+        self._stop_otlp()
+        _OTLP_STORE.reset()            # stop showing costs we no longer track
         self._rebuild_tray_menu()
 
     # -------------------------------------------------- calibration
@@ -3694,6 +4230,101 @@ def run_selftest() -> int:
         capp._check_activity()            # B's own working->waiting -> alert
         assert fired and fired[-1] >= 20, "same-session turn-end not detected"
     print("[selftest] turn timer + your-turn alert OK")
+
+    # --- telemetry receiver -------------------------------------------------
+    # Envelope shape copied from a real Claude Code export (http/json).
+    def _pt(value, attrs, ts):
+        return {"asDouble": value, "timeUnixNano": str(int(ts * 1e9)),
+                "attributes": [{"key": k, "value": {"stringValue": v}}
+                               for k, v in attrs.items()]}
+
+    def _metrics(points, temporality=None):
+        series = {"dataPoints": points}
+        if temporality is not None:
+            series["aggregationTemporality"] = temporality
+        return {"resourceMetrics": [{"scopeMetrics": [{"metrics": [
+            {"name": n, "sum": dict(series, dataPoints=[p])} for n, p in points]}]}]}
+
+    store = OtlpStore()
+    base = time.time() - 60
+    sid = {"session.id": "s1", "model": "claude-opus-5"}
+    cost, tok = "claude_code.cost.usage", "claude_code.token.usage"
+
+    # A cumulative counter's FIRST value is only a baseline: banking it would
+    # charge the whole session-to-date to the window Clawd happened to start in.
+    store.ingest("/v1/metrics", _metrics([(cost, _pt(0.40, sid, base)),
+                                          (tok, _pt(1000, dict(sid, type="input"), base))]))
+    assert store.window(base - 1)["cost_usd"] == 0.0, "baseline must not be banked"
+    assert store.fresh(), "a baseline export still proves the exporter is alive"
+
+    # the next export contributes only its increment
+    store.ingest("/v1/metrics", _metrics([(cost, _pt(1.00, sid, base + 30)),
+                                          (tok, _pt(2500, dict(sid, type="input"), base + 30))]))
+    win = store.window(base - 1)
+    assert abs(win["cost_usd"] - 0.60) < 1e-6, win
+    assert win["tokens"]["input"] == 1500, win
+    assert store.window(base + 40)["cost_usd"] == 0.0, "windowing"
+
+    # a restarted counter (lower value) banks the new value, never a negative
+    store.ingest("/v1/metrics", _metrics([(cost, _pt(0.10, sid, base + 60))]))
+    assert abs(store.window(base - 1)["cost_usd"] - 0.70) < 1e-6, "counter reset"
+
+    # DELTA temporality: every export is already an increment, so no subtracting
+    d = OtlpStore()
+    d.ingest("/v1/metrics", _metrics([(cost, _pt(0.25, sid, base))], temporality=1))
+    d.ingest("/v1/metrics", _metrics([(cost, _pt(0.25, sid, base + 5))], temporality=1))
+    assert abs(d.window(base - 1)["cost_usd"] - 0.50) < 1e-6, "delta temporality"
+
+    # session.id on the resource must still separate concurrent sessions
+    r = OtlpStore()
+    for who, amount in (("a", 5.0), ("b", 9.0)):
+        r.ingest("/v1/metrics", {"resourceMetrics": [{
+            "resource": {"attributes": [
+                {"key": "session.id", "value": {"stringValue": who}}]},
+            "scopeMetrics": [{"metrics": [{"name": cost, "sum": {"dataPoints": [
+                _pt(amount, {}, base)]}}]}]}]})
+    assert len(r._last) == 2, "resource-level session.id was ignored"
+
+    # a future timestamp must not make the store look permanently fresh
+    f = OtlpStore()
+    f.ingest("/v1/metrics", _metrics([(cost, _pt(1.0, sid, time.time() + 3 * 3600))]))
+    assert not f.fresh(), "a future-dated export poisoned freshness"
+
+    # api_error is picked up; prompt text and identity are never retained
+    store.ingest("/v1/logs", {"resourceLogs": [{"scopeLogs": [{"logRecords": [
+        {"timeUnixNano": str(int((base + 70) * 1e9)), "attributes": [
+            {"key": "event.name", "value": {"stringValue": "api_error"}},
+            {"key": "status_code", "value": {"intValue": "429"}},
+            {"key": "model", "value": {"stringValue": "claude-opus-5"}},
+            {"key": "user.email", "value": {"stringValue": "nobody@example.com"}}]},
+        {"timeUnixNano": str(int((base + 71) * 1e9)), "attributes": [
+            {"key": "event.name", "value": {"stringValue": "user_prompt"}},
+            {"key": "prompt", "value": {"stringValue": "SECRET-PROMPT-TEXT"}}]},
+    ]}]}]})
+    assert store.last_error and str(store.last_error[1]) == "429", store.last_error
+    blob = json.dumps([store.last_error, store._deltas, list(store._last)])
+    assert "SECRET-PROMPT-TEXT" not in blob and "nobody@example.com" not in blob, \
+        "telemetry PII must never be retained"
+
+    # malformed and unknown payloads must be harmless
+    store.ingest("/v1/metrics", {"resourceMetrics": [{"scopeMetrics": [{"metrics": [
+        {"name": "claude_code.session.count", "sum": {"dataPoints": [_pt(1, {}, base)]}},
+        {"name": "claude_code.cost.usage", "sum": {"dataPoints": [{"attributes": []}]}},
+    ]}]}]})
+    store.ingest("/v1/logs", {})
+    store.ingest("/v1/unknown", {"nonsense": True})
+
+    stale = OtlpStore()
+    stale.ingest("/v1/metrics", {"resourceMetrics": [{"scopeMetrics": [{"metrics": [
+        {"name": "claude_code.cost.usage", "sum": {"dataPoints": [
+            _pt(5.0, sid, time.time() - OTLP_STALE_S - 60)]}}]}]}]})
+    assert not stale.fresh(), "old telemetry must not read as live"
+
+    assert OTLP_HOST == "127.0.0.1", "the receiver must stay on localhost"
+    assert OTLP_ENV["CLAUDE_CODE_ENABLE_TELEMETRY"] == "1"
+    assert OTLP_ENV["OTEL_EXPORTER_OTLP_PROTOCOL"] == "http/json"
+    print(f"[selftest] telemetry parser OK (cost={fmt_usd(win['cost_usd'])}, "
+          f"tokens={win['tokens']})")
 
     print("[selftest] OK")
     del app

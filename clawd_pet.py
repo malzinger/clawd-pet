@@ -1653,6 +1653,9 @@ STRINGS = {
         "menu_otlp_on": "Echte Kosten aktivieren (Telemetrie)",
         "menu_otlp_off": "Telemetrie deaktivieren",
         "detail_cost": "Kosten: {usd} (gemessen)",
+        "cal_week_text": "Und wie viel Prozent zeigt /usage beim Wochenlimit\n"
+                         "(alle Modelle)?",
+        "cal_stale": "Kalibrierung veraltet – im Tray-Menü neu kalibrieren",
         "row_context": "Kontextfenster",
         "ctx_left": "noch {n} Tokens bis Auto-Compact",
         "otlp_title": "Claude-Code-Telemetrie",
@@ -1768,6 +1771,9 @@ STRINGS = {
         "menu_otlp_on": "Enable real costs (telemetry)",
         "menu_otlp_off": "Disable telemetry",
         "detail_cost": "Cost: {usd} (measured)",
+        "cal_week_text": "And what percentage does /usage show for the weekly\n"
+                         "limit (all models)?",
+        "cal_stale": "Calibration is stale – recalibrate via the tray menu",
         "row_context": "Context window",
         "ctx_left": "{n} tokens until auto-compact",
         "otlp_title": "Claude Code telemetry",
@@ -2928,10 +2934,17 @@ class PanelWidget(QWidget):
             wtail = ("  ·  " + _fmt_reset(snap.week_reset)
                      if snap.week_reset is not None else "  ·  " + tr("rolling7"))
             wk = self._ensure_row("week_all", tr("row_week_all"))
-            wk["reset"].setText(tr("tokens_n", n=fmt_de(snap.week_total)) + wtail)
+            wtext = tr("tokens_n", n=fmt_de(snap.week_total)) + wtail
             wbudget = weekly_budget_all()
             if wbudget:
-                self._animate_row(wk, snap.week_weighted / wbudget * 100.0)
+                wpct = snap.week_weighted / wbudget * 100.0
+                self._animate_row(wk, min(100.0, wpct))
+                if wpct > 100.0:
+                    # Anthropic would have cut you off long before 100 %, so a
+                    # reading above it proves the budget is stale, not the usage
+                    wk["pct"].setText("?")
+                    wtext = tr("cal_stale")
+            wk["reset"].setText(wtext)
             keys.add("week_all")
             for name, mb in weekly_model_budgets().items():
                 tokens = snap.week_by_model.get(name, 0)
@@ -3784,6 +3797,18 @@ class ClawdApp:
         budget = int(round(snap.weighted / (pct / 100.0)))
         self.settings.setValue("max_tokens", budget)
         set_max_tokens_override(budget)
+
+        # The weekly budget used to be learnable only from the live sync, so
+        # without this second question a wrong weekly bar could never be fixed.
+        if snap.week_weighted > 0:
+            wpct, ok = QInputDialog.getDouble(
+                None, tr("cal_prompt_title"), tr("cal_week_text"),
+                value=50.0, min=0.5, max=100.0, decimals=1)
+            if ok:
+                wbudget = int(round(snap.week_weighted / (wpct / 100.0)))
+                self.settings.setValue("weekly_budget_all", wbudget)
+                set_auto_calibration(weekly_budget=wbudget)
+
         self._rebuild_tray_menu()
         QMessageBox.information(
             None, tr("cal_done_title"), tr("cal_done_text", n=fmt_de(budget)))

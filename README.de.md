@@ -55,8 +55,10 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
   rekonstruiert aus den Zeitstempeln Anthropics **festes 5-Stunden-Fenster**
   (startet mit deiner ersten Nachricht und setzt sich nach 5 h komplett
   zurück — wie in Claudes eigener Anzeige) und summiert nur die Tokens des
-  aktuellen Fensters (Streaming-Duplikate werden dedupliziert). Nichts
-  verlässt deinen Rechner — kein Account, keine Cloud.
+  aktuellen Fensters (Streaming-Duplikate werden dedupliziert). Jeder
+  Rescan liest nur die seit dem letzten angehängten Bytes — ein auf hunderte
+  Megabyte gewachsenes Session-Log kostet so Millisekunden statt Sekunden.
+  Nichts verlässt deinen Rechner — kein Account, keine Cloud.
 - Klick oder Hover auf Clawd öffnet ein Panel im Claude-Look: 5-Stunden-Limit
   mit Fortschrittsbalken, **Aufschlüsselung pro Modell** (Fable, Opus,
   Sonnet, …) und Countdown bis zum Fenster-Reset.
@@ -83,6 +85,22 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
   bevor es `settings.json` anfasst, und legt ein `.clawd-bak`-Backup an. Der
   Telemetrie-Strom enthält auch deine E-Mail-Adresse und Prompt-Texte; Clawd
   liest nur die benötigten Zahlen und speichert davon nichts.
+- **Wer hat das Budget verbraucht:** Lief im Fenster mehr als ein Projekt,
+  schlüsselt das Panel die drei größten namentlich auf — mit Tokens und
+  Kosten. Zu jedem Fenster und jeder Woche steht außerdem ein **geschätzter
+  Preis in USD** zu Anthropics öffentlichen API-Tarifen (`≈ $12,40
+  (API-Listenpreis)`) — also das, was dieselbe Arbeit ohne Abo gekostet hätte.
+  Mit aktivierter Telemetrie ersetzt der gemessene Wert die Schätzung.
+- **Runaway-Warnung:** Verschwinden mehr als 8 % des 5-Stunden-Budgets
+  innerhalb von fünf Minuten — ein Agent in der Schleife, ein entgleister
+  Batch-Lauf —, sagt das ein Tray-Hinweis und nennt die Minute, in der das
+  Budget leer wäre. Die Burn-Prognose im Panel mittelt über eine Stunde und
+  würde es viel zu spät merken.
+- **Meeting-Modus (Windows):** Während du präsentierst, den Bildschirm teilst
+  oder im Vollbild spielst, nimmt Clawd sich vom Desktop und hält alle Toasts
+  zurück; danach kommt er von selbst zurück. Windows meldet diesen Zustand
+  selbst (`SHQueryUserNotificationState`), es muss also nichts eingerichtet
+  werden. Standardmäßig an, im Tray-Menü abschaltbar.
 - **Selbst-kalibrierend:** Anthropic veröffentlicht die echten Token-Kontingente
   nicht. Rechtsklick → „Limit kalibrieren …", einmal den Prozentwert aus Claudes
   eigenem `/usage`-Popup eintippen — die App leitet daraus dein echtes Budget ab,

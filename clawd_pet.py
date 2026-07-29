@@ -135,6 +135,14 @@ WEIGHT_CACHE_READ = 0.1
 MODEL_COST = {"Opus": 5.0, "Sonnet": 1.0, "Haiku": 0.3, "Fable": 0.3}
 WEIGHT_VERSION = 2      # bump to drop stale calibrations after changing the weights
 
+# Price of one weighted unit. The weights above ARE Sonnet's public API prices
+# in disguise (input 1 = $3/Mtok, output 5 = $15, cache write 1.25 = $3.75,
+# cache read 0.1 = $0.30), and MODEL_COST scales the other tiers from there —
+# so the weighted sum turns into dollars with a single multiplication. This is
+# an estimate at list prices, not what a subscription actually bills; the
+# measured figure comes from Claude Code's own telemetry when it is enabled.
+USD_PER_WEIGHTED = 3.0 / 1_000_000
+
 
 def model_cost(name: str) -> float:
     return MODEL_COST.get(name, 1.0)
@@ -175,11 +183,15 @@ HOOK_EVENTS = ["PreToolUse", "Notification", "Stop", "SessionStart"]
 
 ORG_NAME = "ClawdPet"
 APP_NAME = "Clawd"
-APP_VERSION = "1.10.0"
+APP_VERSION = "1.11.0"
 
 # --- Burn-rate forecast + threshold notifications ----------------------------
 BURN_LOOKBACK_S = 3600      # forecast fits over at most the last hour
 BURN_MIN_SPAN_S = 300       # ... but needs at least 5 minutes of samples
+RUNAWAY_WINDOW_S = 300      # burst detector: how far back a runaway is measured
+RUNAWAY_PCT = 8.0           # ... and how much of the budget in it is too much
+RUNAWAY_COOLDOWN_S = 1800   # at most one runaway warning per half hour
+PROJECT_ROWS = 3            # projects the panel breaks out (biggest first)
 NOTIFY_THRESHOLDS = (95.0, 80.0)   # toast on upward crossings, highest wins
 WAIT_ALERT_MIN_S = 15       # only alert "your turn" on turns worked at least this long
 ALERT_COOLDOWN_S = 20       # collapse near-simultaneous alerts (hook + log)
@@ -225,6 +237,8 @@ class UsageSnapshot:
     source: str = "logs"                          # always "logs" — the only source
     cost_usd: float = 0.0                         # real window cost, if telemetry runs
     cost_live: bool = False                       # True while telemetry is feeding us
+    cost_est: float = 0.0                         # list-price estimate of the window
+    week_cost_est: float = 0.0                    # ... and of the weekly window
     ctx_tokens: int = 0                           # context fill of the live session
     ctx_limit: int = 0                            # inferred context tier of that session
     by_model: dict = field(default_factory=dict)  # model id -> input+output tokens
@@ -237,6 +251,10 @@ class UsageSnapshot:
     week_weighted: float = 0.0
     by_model_weighted: dict = field(default_factory=dict)
     week_by_model_weighted: dict = field(default_factory=dict)
+    by_project: dict = field(default_factory=dict)          # project -> in+out
+    by_project_weighted: dict = field(default_factory=dict)
+    week_by_project: dict = field(default_factory=dict)
+    week_by_project_weighted: dict = field(default_factory=dict)
     burn_eta: Optional[datetime] = None           # projected time of hitting 100 %
 
 
@@ -334,34 +352,53 @@ def _parse_iso_ts(raw) -> Optional[datetime]:
         return None
 
 
-_FILE_CACHE: dict = {}      # path -> (mtime_ns, size, entries) — worker thread only
+# path -> [mtime_ns, size, entries, byte offset, project] — worker thread only.
+# Pruned after every scan to the files that scan actually looked at, so it can
+# never outgrow the weekly working set.
+_FILE_CACHE: dict = {}
 
 
-def _parse_file_entries(fp: Path) -> list:
-    """All usage entries of one session log, cached by (mtime, size).
+def _project_name(rec: dict) -> str:
+    """The project a log record belongs to, from the working directory.
 
-    Finished session files never change, so each is parsed exactly once per
-    process; only actively written logs are re-read on the 20 s rescans."""
-    try:
-        st = fp.stat()
-    except OSError:
-        return []
-    key = str(fp)
-    cached = _FILE_CACHE.get(key)
-    if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
-        return cached[2]
+    The folder under ~/.claude/projects is the path with its separators
+    mangled ("C--Users-fried-Desktop-claude-usage-pet"), so the `cwd` field
+    every record carries is the only place the real name survives."""
+    cwd = rec.get("cwd")
+    if not isinstance(cwd, str):
+        return ""
+    raw = cwd.replace("\\", "/").rstrip("/")
+    return raw.rsplit("/", 1)[-1] if raw else ""
+
+
+def _read_entries(fp: Path, start: int):
+    """Parse usage rows from byte `start` on -> (entries, project, offset).
+
+    Only complete lines are consumed: the log Claude Code is writing right now
+    regularly ends mid-line, and that fragment has to stay unread until the
+    rest of it arrives. Returns entries=None if the file could not be read.
+    """
     entries = []
+    project = ""
+    offset = start
     try:
-        with open(fp, "r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                if '"usage"' not in line:
+        with open(fp, "rb") as fh:
+            if start:
+                fh.seek(start)
+            for raw in fh:
+                if not raw.endswith(b"\n"):
+                    break               # half-written line — try again next scan
+                offset += len(raw)
+                if b'"usage"' not in raw:
                     continue
                 try:
-                    rec = json.loads(line)
+                    rec = json.loads(raw.decode("utf-8", "replace"))
                 except (json.JSONDecodeError, ValueError):
                     continue
                 if not isinstance(rec, dict):
                     continue
+                if not project:
+                    project = _project_name(rec)
                 ts = _parse_iso_ts(rec.get("timestamp"))
                 if ts is None:
                     continue
@@ -380,9 +417,57 @@ def _parse_file_entries(fp: Path) -> list:
                 entry.append(mid if isinstance(mid, str) else "")
                 entries.append(entry)
     except OSError:
-        return []
-    _FILE_CACHE[key] = (st.st_mtime_ns, st.st_size, entries)
-    return entries
+        return None, project, start
+    return entries, project, offset
+
+
+def _parse_file(fp: Path):
+    """(entries, project) of one session log, cached by (mtime, size).
+
+    Finished session files never change, so each is parsed exactly once per
+    process. The active log only ever grows, so a rescan parses just the bytes
+    appended since the last one — that is what keeps a 2-second poll cheap on
+    a session that has grown to several megabytes."""
+    try:
+        st = fp.stat()
+    except OSError:
+        return [], ""
+    key = str(fp)
+    cached = _FILE_CACHE.get(key)
+    if cached is not None:
+        if cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+            return cached[2], cached[4]
+        if st.st_size > cached[1] and cached[3] > 0:
+            added, project, offset = _read_entries(fp, cached[3])
+            if added is not None:
+                cached[0] = st.st_mtime_ns
+                cached[1] = st.st_size
+                # a fresh list, never an in-place extend: the previous scan may
+                # still be holding the old one
+                cached[2] = cached[2] + added
+                cached[3] = offset
+                cached[4] = cached[4] or project
+                return cached[2], cached[4]
+    entries, project, offset = _read_entries(fp, 0)
+    if entries is None:
+        # unreadable right now (Claude Code holds it, a network drive hiccups):
+        # last known good beats reporting the session as empty for one cycle
+        return (cached[2], cached[4]) if cached else ([], "")
+    _FILE_CACHE[key] = [st.st_mtime_ns, st.st_size, entries, offset, project]
+    return entries, project
+
+
+def _parse_file_entries(fp: Path) -> list:
+    return _parse_file(fp)[0]
+
+
+def _prune_file_cache(keep) -> None:
+    """Forget logs the finished scan did not even look at.
+
+    Without this every session file ever parsed would stay in memory for the
+    lifetime of the process, long after it dropped out of the weekly window."""
+    for key in [k for k in _FILE_CACHE if k not in keep]:
+        del _FILE_CACHE[key]
 
 
 def _usage_entry(usage: dict, ts: datetime):
@@ -467,6 +552,8 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
     by_msg_id = {}
     anonymous = []
     newest_mtime = datetime.min.replace(tzinfo=timezone.utc)
+    parsed = set()          # everything still worth keeping in _FILE_CACHE
+    interrupted = False
 
     try:
         files = list(CLAUDE_PROJECTS_DIR.rglob("*.jsonl"))
@@ -476,6 +563,7 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
 
     for fp in files:
         if should_stop is not None and should_stop():
+            interrupted = True
             break   # app is quitting — a partial snapshot is fine
         try:
             mtime = datetime.fromtimestamp(fp.stat().st_mtime, tz=timezone.utc)
@@ -487,20 +575,26 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
             newest_mtime = mtime
             snap.newest_file = str(fp)
         snap.files_scanned += 1
-        for entry in _parse_file_entries(fp):
+        parsed.add(str(fp))
+        entries, project = _parse_file(fp)
+        project = project or fp.parent.name
+        for entry in entries:
             ts = entry[4]
             if ts < horizon or ts > now + timedelta(minutes=5):
                 continue
             mid = entry[6]
             if mid:
                 prev = by_msg_id.get(mid)
-                if prev is None or _entry_weight(entry) > _entry_weight(prev):
-                    by_msg_id[mid] = entry
+                if prev is None or _entry_weight(entry) > _entry_weight(prev[0]):
+                    by_msg_id[mid] = (entry, project)
             else:
-                anonymous.append(entry)
+                anonymous.append((entry, project))
+
+    if not interrupted:
+        _prune_file_cache(parsed)
 
     all_entries = list(by_msg_id.values()) + anonymous
-    chain_ts = sorted(e[4] for e in all_entries if e[4] >= chain_cutoff)
+    chain_ts = sorted(e[4] for e, _p in all_entries if e[4] >= chain_cutoff)
     window_start = _current_window_start(chain_ts, now)
     snap.oldest = window_start          # countdown target: window_start + 5 h
 
@@ -508,7 +602,7 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
     snap.week_start = week_start
     snap.week_reset = week_reset
 
-    for inp, out, cr, cc, ts, model, _mid in all_entries:
+    for (inp, out, cr, cc, ts, model, _mid), project in all_entries:
         name = pretty_model(model)
         w = ((inp * WEIGHT_INPUT + out * WEIGHT_OUTPUT
               + cc * WEIGHT_CACHE_CREATION + cr * WEIGHT_CACHE_READ)
@@ -519,6 +613,10 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
             snap.week_by_model[name] = snap.week_by_model.get(name, 0) + inp + out
             snap.week_by_model_weighted[name] = (
                 snap.week_by_model_weighted.get(name, 0.0) + w)
+            snap.week_by_project[project] = (
+                snap.week_by_project.get(project, 0) + inp + out)
+            snap.week_by_project_weighted[project] = (
+                snap.week_by_project_weighted.get(project, 0.0) + w)
         if window_start is None or ts < window_start:
             continue                    # previous, already reset window
         snap.entries += 1
@@ -529,6 +627,9 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
         snap.weighted += w
         snap.by_model[name] = snap.by_model.get(name, 0) + inp + out
         snap.by_model_weighted[name] = snap.by_model_weighted.get(name, 0.0) + w
+        snap.by_project[project] = snap.by_project.get(project, 0) + inp + out
+        snap.by_project_weighted[project] = (
+            snap.by_project_weighted.get(project, 0.0) + w)
 
     # How full the live session's context window is: the newest request shows
     # what was actually sent to the model. A different budget from the 5-hour
@@ -550,6 +651,8 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
             snap.ctx_limit = context_limit(ctx_max)
 
     snap.total = snap.input_tokens + snap.output_tokens
+    snap.cost_est = snap.weighted * USD_PER_WEIGHTED
+    snap.week_cost_est = snap.week_weighted * USD_PER_WEIGHTED
     budget = effective_max_tokens()
     snap.pct = (snap.weighted / budget * 100.0) if budget > 0 else 0.0
     return snap
@@ -1403,6 +1506,27 @@ def burn_eta(samples, limit: float = 100.0) -> Optional[datetime]:
     return t1 + timedelta(seconds=(limit - p1) / rate)
 
 
+def runaway_rate(samples, window_s: float = RUNAWAY_WINDOW_S) -> Optional[float]:
+    """Percentage points of the budget burned in the last `window_s` seconds.
+
+    The burn forecast smooths over a whole hour, which is exactly what hides
+    the case this catches: an agent that started looping five minutes ago.
+    Returns None while the samples do not cover at least half the window —
+    a rate extrapolated from 20 seconds would fire on every normal turn.
+    """
+    if len(samples) < 2:
+        return None
+    cutoff = samples[-1][0] - timedelta(seconds=window_s)
+    recent = [s for s in samples if s[0] >= cutoff]
+    if len(recent) < 2:
+        return None
+    span = (recent[-1][0] - recent[0][0]).total_seconds()
+    if span < window_s / 2:
+        return None
+    delta = recent[-1][1] - recent[0][1]
+    return delta * (window_s / span) if delta > 0 else None
+
+
 def notify_decision(prev: Optional[float], cur: float) -> Optional[str]:
     """Map a pct transition between two scans to a notification key (or None).
 
@@ -1417,6 +1541,30 @@ def notify_decision(prev: Optional[float], cur: float) -> Optional[str]:
         if prev < th <= cur:
             return f"warn{int(th)}"
     return None
+
+
+#  QUNS_* from SHQueryUserNotificationState: everything except
+#  QUNS_ACCEPTS_NOTIFICATIONS (5) means "do not put anything on this screen".
+_QUNS_QUIET = (2, 3, 4, 6, 7)   # busy, D3D full screen, presenting, quiet, app
+
+
+def presentation_mode() -> bool:
+    """True while Windows says the user is presenting or in full screen.
+
+    That is exactly when a desktop pet must get out of the way: screen
+    sharing, a beamer, a full-screen game. Anything unexpected counts as
+    "normal" — a wrong True would make Clawd vanish for no reason."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        state = ctypes.c_int(0)
+        if ctypes.windll.shell32.SHQueryUserNotificationState(
+                ctypes.byref(state)) != 0:      # anything but S_OK
+            return False
+        return state.value in _QUNS_QUIET
+    except Exception:
+        return False
 
 
 def autostart_supported() -> bool:
@@ -1665,7 +1813,14 @@ STRINGS = {
         "menu_hooks_off": "Echtzeit-Hooks deaktivieren",
         "menu_otlp_on": "Echte Kosten aktivieren (Telemetrie)",
         "menu_otlp_off": "Telemetrie deaktivieren",
+        "menu_meeting": "Meeting-Modus (bei Präsentation ausblenden)",
         "detail_cost": "Kosten: {usd} (gemessen)",
+        "detail_cost_est": "Kosten: ≈ {usd} (API-Listenpreis)",
+        "proj_cost": "{n} Tokens  ·  ≈ {usd}",
+        "notify_runaway_title": "Ungewöhnlich hoher Verbrauch",
+        "notify_runaway_text": "In den letzten 5 Minuten sind {p} deines "
+                               "5-Stunden-Budgets weg. In dem Tempo ist es in "
+                               "{n} Min. leer.",
         "cal_week_text": "Und wie viel Prozent zeigt /usage beim Wochenlimit\n"
                          "(alle Modelle)?",
         "cal_stale": "Kalibrierung veraltet – im Tray-Menü neu kalibrieren",
@@ -1786,7 +1941,13 @@ STRINGS = {
         "menu_hooks_off": "Disable real-time hooks",
         "menu_otlp_on": "Enable real costs (telemetry)",
         "menu_otlp_off": "Disable telemetry",
+        "menu_meeting": "Meeting mode (hide while presenting)",
         "detail_cost": "Cost: {usd} (measured)",
+        "detail_cost_est": "Cost: ≈ {usd} (API list price)",
+        "proj_cost": "{n} tokens  ·  ≈ {usd}",
+        "notify_runaway_title": "Unusually fast burn",
+        "notify_runaway_text": "{p} of your 5-hour budget went in the last "
+                               "5 minutes. At that pace it is empty in {n} min.",
         "cal_week_text": "And what percentage does /usage show for the weekly\n"
                          "limit (all models)?",
         "cal_stale": "Calibration is stale – recalibrate via the tray menu",
@@ -2949,11 +3110,32 @@ class PanelWidget(QWidget):
                 mrow["reset"].setText(tr("tokens_inout", n=fmt_de(tok)))
                 keys.add(mkey)
 
+            # which projects burned this window — only worth a row when more
+            # than one is involved, otherwise it just repeats the 5-hour line
+            projects = sorted(
+                ((p, t) for p, t in snap.by_project.items() if p and t > 0),
+                key=lambda kv: -snap.by_project_weighted.get(kv[0], 0.0))
+            if len(projects) > 1:
+                for pname, tok in projects[:PROJECT_ROWS]:
+                    pkey = f"proj:{pname}"
+                    label = pname if len(pname) <= 22 else pname[:21] + "…"
+                    prow = self._ensure_row(pkey, label)
+                    pw = snap.by_project_weighted.get(pname, 0.0)
+                    self._animate_row(
+                        prow, (pw / budget * 100.0) if budget > 0 else 0.0)
+                    prow["reset"].setText(tr(
+                        "proj_cost", n=fmt_de(tok),
+                        usd=fmt_usd(pw * USD_PER_WEIGHTED)))
+                    keys.add(pkey)
+
             # weekly limits, estimated from the same logs
             wtail = ("  ·  " + _fmt_reset(snap.week_reset)
                      if snap.week_reset is not None else "  ·  " + tr("rolling7"))
             wk = self._ensure_row("week_all", tr("row_week_all"))
-            wtext = tr("tokens_n", n=fmt_de(snap.week_total)) + wtail
+            wtext = tr("tokens_n", n=fmt_de(snap.week_total))
+            if snap.week_cost_est > 0:
+                wtext += "  ·  ≈ " + fmt_usd(snap.week_cost_est)
+            wtext += wtail
             wbudget = weekly_budget_all()
             if wbudget:
                 wpct = snap.week_weighted / wbudget * 100.0
@@ -2986,6 +3168,9 @@ class PanelWidget(QWidget):
             detail = tr("detail_used", n=fmt_de(snap.total), hint=hint)
             if snap.cost_live:      # telemetry knows the real price of this window
                 detail += "  ·  " + tr("detail_cost", usd=fmt_usd(snap.cost_usd))
+            elif snap.cost_est > 0:
+                detail += "  ·  " + tr("detail_cost_est",
+                                       usd=fmt_usd(snap.cost_est))
             self.detail_label.setText(detail)
         self.detail_label.setVisible(bool(self.detail_label.text()))
         self._update_forecast(snap)
@@ -3251,6 +3436,10 @@ class ClawdApp:
         # the forecast and the threshold toasts would go dark for minutes.
         self._burn_samples = {}          # source -> list[(utc time, pct)]
         self._prev_pct = {}              # source -> last pct seen
+        self.meeting_mode = self.settings.value("meeting_mode", True, type=bool)
+        self._meeting_hidden = False     # we hid the pet, so we may show it again
+        self._meeting_override = False   # ... unless the user overruled that
+        self._last_runaway_mono = 0.0    # rate-limit the burst warning
         self.history = HistoryStore()
         self.check_updates = self.settings.value(
             "check_updates", UPDATE_CHECK, type=bool)
@@ -3385,6 +3574,13 @@ class ClawdApp:
         act_sound.triggered.connect(self.toggle_notify_sound)
         menu.addAction(act_sound)
 
+        if sys.platform == "win32":
+            act_meeting = QAction(tr("menu_meeting"), menu)
+            act_meeting.setCheckable(True)
+            act_meeting.setChecked(self.meeting_mode)
+            act_meeting.triggered.connect(self.toggle_meeting_mode)
+            menu.addAction(act_meeting)
+
         if hooks_registered(CLAUDE_SETTINGS_FILE):
             act_hooks = QAction(tr("menu_hooks_off"), menu)
             act_hooks.triggered.connect(self.disable_hooks)
@@ -3456,6 +3652,9 @@ class ClawdApp:
             self.pet.hide()
             self.panel.hide_animated()
         else:
+            # showing by hand outranks meeting mode until the meeting is over
+            self._meeting_override = True
+            self._meeting_hidden = False
             self.pet.show()
 
     # -------------------------------------------------- scanning
@@ -3480,7 +3679,9 @@ class ClawdApp:
             samples[:] = [s for s in samples if s[0] >= cutoff]
             snap.burn_eta = burn_eta(samples)
             self._notify_transition(snap.source, snap.pct)
+            self._check_runaway(samples, snap)
             self.history.add(now, snap.pct)
+        self._apply_meeting_mode()
         cal = auto_calibration()          # keep the calibrated budgets on disk
         if cal["budget_5h"]:
             self.settings.setValue("auto_budget_5h", cal["budget_5h"])
@@ -3632,18 +3833,68 @@ class ClawdApp:
         self.settings.setValue("notify_sound", self.notify_sound)
         self._rebuild_tray_menu()
 
-    def _fire_alert(self, title: str, text: str):
+    def _fire_alert(self, title: str, text: str) -> bool:
         """A 'your turn' tray toast, rate-limited so near-simultaneous
-        triggers (a hook and the log poll) do not double-fire."""
+        triggers (a hook and the log poll) do not double-fire. Returns whether
+        the toast actually went out, so callers can keep their own cooldown in
+        step with what the user really saw."""
         now = time.monotonic()
         if (not self.notify_enabled or self.tray is None
+                or self._meeting_hidden
                 or now - self._last_alert_mono < ALERT_COOLDOWN_S):
-            return
+            return False
         self._last_alert_mono = now
         self._last_toast_was_update = False
         self.tray.showMessage(title, text, QSystemTrayIcon.Information, 7000)
         if self.notify_sound:
             QApplication.beep()
+        return True
+
+    def _check_runaway(self, samples, snap: UsageSnapshot):
+        """Warn when the budget suddenly drains — a looping agent, a batch job
+        gone wild. The panel's forecast averages over a whole hour and would
+        only catch this long after the damage is done."""
+        if snap.pct >= 100.0:
+            return                      # at the limit there is nothing to save
+        rate = runaway_rate(samples)
+        if rate is None or rate < RUNAWAY_PCT:
+            return
+        now = time.monotonic()
+        if now - self._last_runaway_mono < RUNAWAY_COOLDOWN_S:
+            return
+        minutes = max(1, int((100.0 - snap.pct) / rate
+                             * (RUNAWAY_WINDOW_S / 60.0)))
+        if self._fire_alert(tr("notify_runaway_title"),
+                            tr("notify_runaway_text", p=fmt_pct_de(rate),
+                               n=minutes)):
+            self._last_runaway_mono = now
+
+    def _apply_meeting_mode(self):
+        """Get off the screen while the user presents, shares or plays.
+
+        Only ever un-hides what we hid ourselves, and a manual 'show' during a
+        presentation wins until it is over."""
+        busy = self.meeting_mode and presentation_mode()
+        if not busy:
+            self._meeting_override = False
+            if self._meeting_hidden:
+                self._meeting_hidden = False
+                self.pet.show()
+            return
+        if self._meeting_hidden or self._meeting_override:
+            return
+        if not self.pet.isVisible():
+            return                      # already hidden by hand — leave it be
+        self._meeting_hidden = True
+        self.pet.hide()
+        self.panel.hide_animated()
+        self.bubble.hide()
+
+    def toggle_meeting_mode(self):
+        self.meeting_mode = not self.meeting_mode
+        self.settings.setValue("meeting_mode", self.meeting_mode)
+        self._apply_meeting_mode()
+        self._rebuild_tray_menu()
 
     def _alert_turn_done(self, elapsed: float):
         """Alert when a turn Claude actually spent time on has finished."""
@@ -3706,7 +3957,8 @@ class ClawdApp:
         prev = self._prev_pct.get(source)
         self._prev_pct[source] = pct
         kind = notify_decision(prev, pct)
-        if kind is None or self.tray is None or not self.notify_enabled:
+        if (kind is None or self.tray is None or not self.notify_enabled
+                or self._meeting_hidden):
             return
         icon = (QSystemTrayIcon.Information if kind == "reset"
                 else QSystemTrayIcon.Warning)
@@ -3935,16 +4187,21 @@ def run_selftest() -> int:
         app.processEvents()
 
     # Verify no label is clipped: every label must fit its own width.
-    clipped = []
-    for w in panel.findChildren(QLabel):
-        txt = w.text()
-        if not txt or not w.isVisibleTo(panel):
-            continue
-        need = w.fontMetrics().boundingRect(
-            QRect(0, 0, w.width(), 10_000),
-            Qt.TextWordWrap if w.wordWrap() else 0, txt)
-        if need.width() > w.width() + 1 or need.height() > w.height() + 1:
-            clipped.append((txt[:40], need.width(), w.width(), need.height(), w.height()))
+    def clipped_labels():
+        out = []
+        for w in panel.findChildren(QLabel):
+            txt = w.text()
+            if not txt or not w.isVisibleTo(panel):
+                continue
+            need = w.fontMetrics().boundingRect(
+                QRect(0, 0, w.width(), 10_000),
+                Qt.TextWordWrap if w.wordWrap() else 0, txt)
+            if need.width() > w.width() + 1 or need.height() > w.height() + 1:
+                out.append((txt[:40], need.width(), w.width(),
+                            need.height(), w.height()))
+        return out
+
+    clipped = clipped_labels()
     print(f"[selftest] panel size: {panel.width()}x{panel.height()}, clipped labels: {clipped}")
     assert not clipped, f"clipped labels: {clipped}"
 
@@ -4171,6 +4428,117 @@ def run_selftest() -> int:
     capp._notify_transition("logs", 41.0)
     assert capp._burn_samples.get("api"), "api burn history wiped by logs blip"
     print("[selftest] per-source burn/notify state OK")
+
+    # incremental parsing: the live log is only ever appended to, so a rescan
+    # must read just the new bytes — and must not choke on the half-written
+    # line Claude Code leaves behind while it is streaming
+    def _row(ts, out, mid):
+        return json.dumps({
+            "timestamp": ts, "cwd": "C:\\Users\\x\\Desktop\\demo proj",
+            "message": {"id": mid, "model": "claude-opus-4-8",
+                        "usage": {"input_tokens": 10, "output_tokens": out}}})
+
+    with tempfile.TemporaryDirectory() as td:
+        log = Path(td) / "session.jsonl"
+        log.write_text(_row("2026-07-29T10:00:00Z", 5, "m1") + "\n",
+                       encoding="utf-8")
+        first, project = _parse_file(log)
+        assert len(first) == 1, f"first parse: {len(first)}"
+        assert project == "demo proj", f"project from cwd: {project!r}"
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write(_row("2026-07-29T10:01:00Z", 7, "m2") + "\n")
+            fh.write('{"timestamp": "2026-07-29T10:02:00Z", "message"')  # torn
+        second = _parse_file(log)[0]
+        assert [e[1] for e in second] == [5, 7], f"append lost: {second}"
+        assert second is not first, "cached list mutated under an earlier caller"
+        with open(log, "a", encoding="utf-8") as fh:      # the rest arrives
+            fh.write(': {"id": "m3", "model": "claude-opus-4-8", "usage": '
+                     '{"input_tokens": 3, "output_tokens": 9}}}\n')
+        assert len(_parse_file(log)[0]) == 3, "completed line never picked up"
+        log.write_text("", encoding="utf-8")              # rewritten, not grown
+        assert _parse_file(log)[0] == [], "shrunk file not re-read from scratch"
+    _FILE_CACHE["\x00gone.jsonl"] = [0, 0, [], 0, ""]
+    _prune_file_cache({"\x00kept.jsonl"})
+    assert "\x00gone.jsonl" not in _FILE_CACHE, "cache keeps files nobody scans"
+    print("[selftest] incremental parsing + cache pruning OK")
+
+    # per-project attribution and the list-price cost estimate
+    snap_pr = UsageSnapshot(updated_at=datetime.now(), pct=20.0, total=1000,
+                            weighted=2_000_000.0, cost_est=6.0,
+                            by_project={"alpha": 800, "beta": 200},
+                            by_project_weighted={"alpha": 1.6e6, "beta": 4e5})
+    panel.show()
+    panel.update_snapshot(snap_pr)
+    app.processEvents()
+    assert "proj:alpha" in panel._rows, "no project row"
+    assert "$" in panel._rows["proj:alpha"]["reset"].text()
+    assert "≈" in panel.detail_label.text(), panel.detail_label.text()
+    assert not clipped_labels(), f"project rows clipped: {clipped_labels()}"
+    panel.grab().save(str(Path(__file__).resolve().parent
+                          / "panel_preview_projects.png"))
+    panel.hide()
+    snap_one = UsageSnapshot(updated_at=datetime.now(), pct=20.0,
+                             by_project={"alpha": 800},
+                             by_project_weighted={"alpha": 1.6e6})
+    panel.update_snapshot(snap_one)     # a single project adds no information
+    assert not panel._rows["proj:alpha"]["bar"].isVisible()
+    assert abs(2_000_000.0 * USD_PER_WEIGHTED - 6.0) < 1e-9
+    print("[selftest] per-project rows + cost estimate OK")
+
+    # runaway watchdog: a burst inside the last 5 minutes, not an hour average
+    r0 = datetime.now(timezone.utc)
+    burst = [(r0 - timedelta(seconds=300), 10.0), (r0, 25.0)]
+    assert abs(runaway_rate(burst) - 15.0) < 0.01
+    assert runaway_rate([(r0 - timedelta(seconds=20), 10.0),
+                         (r0, 12.0)]) is None      # too little history to judge
+    assert runaway_rate([(r0 - timedelta(seconds=300), 30.0),
+                         (r0, 30.0)]) is None      # flat
+    capp._last_runaway_mono = 0.0
+    capp._last_alert_mono = 0.0
+    capp._check_runaway(burst, UsageSnapshot(updated_at=datetime.now(), pct=25.0))
+    assert capp._last_runaway_mono == 0.0, "cooldown burned on a toast nobody saw"
+    print("[selftest] runaway watchdog OK")
+
+    # meeting mode: off the screen while presenting, back afterwards
+    assert isinstance(presentation_mode(), bool)
+
+    class _StubTray:
+        def __init__(self):
+            self.messages = []
+
+        def showMessage(self, *a):
+            self.messages.append(a)
+
+    _real_pm = globals()["presentation_mode"]
+    globals()["presentation_mode"] = lambda: True
+    stub = _StubTray()
+    try:
+        capp.meeting_mode = True
+        capp._meeting_hidden = capp._meeting_override = False
+        capp.pet.show()
+        capp._apply_meeting_mode()
+        assert capp._meeting_hidden and not capp.pet.isVisible(), \
+            "pet stayed on screen during a presentation"
+        capp.tray = stub
+        capp._last_alert_mono = 0.0
+        assert not capp._fire_alert("t", "x"), "toast fired mid-presentation"
+        assert not stub.messages
+        capp._meeting_hidden = False
+        assert capp._fire_alert("t", "x") and stub.messages, "toast lost"
+        capp._meeting_hidden = True
+        capp.pet.hide()
+        capp.toggle_pet_visible()          # the user overrules meeting mode
+        assert capp._meeting_override and capp.pet.isVisible()
+        capp._apply_meeting_mode()
+        assert capp.pet.isVisible(), "manual override ignored"
+    finally:
+        globals()["presentation_mode"] = _real_pm
+        capp.tray = None
+    capp._apply_meeting_mode()             # presentation over
+    assert not capp._meeting_override and not capp._meeting_hidden
+    capp.meeting_mode = False
+    capp._last_alert_mono = 0.0            # hand the app back as we found it
+    print("[selftest] meeting mode OK")
 
     # autostart: command resolvable, registry read only (no write in a test)
     if autostart_supported():

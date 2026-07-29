@@ -54,7 +54,9 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
   session window** from the activity timestamps (it starts with your first
   message and fully resets 5 h later — matching Claude's own display) and
   sums only the tokens of the current window (streaming duplicates are
-  deduplicated). Nothing ever leaves your machine — no account, no cloud.
+  deduplicated). Each rescan reads only the bytes appended since the last one,
+  so a session log grown to hundreds of megabytes still costs milliseconds.
+  Nothing ever leaves your machine — no account, no cloud.
 - Click or hover Clawd for a Claude-style panel: 5-hour limit with progress
   bar, **per-model breakdown** (Fable, Opus, Sonnet, …) and a countdown until
   the window resets.
@@ -79,6 +81,21 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
   credentials involved. Clawd asks before it touches `settings.json` and keeps a
   `.clawd-bak` backup. The telemetry stream also carries your email address and
   prompt text; Clawd reads only the numbers it needs and never stores any of it.
+- **Which project ate the budget:** when more than one project ran inside the
+  window, the panel breaks out the biggest three by name with their tokens and
+  cost. Every window and week also carries an **estimated price in USD** at
+  Anthropic's public API rates (`≈ $12.40 (API list price)`) — what the same
+  work would have cost without a subscription. Enable telemetry and the
+  estimate is replaced by the measured figure.
+- **Runaway warning:** if more than 8 % of the 5-hour budget disappears within
+  five minutes — an agent stuck in a loop, a batch job gone wild — a tray
+  toast says so and names the minute the budget would be gone. The panel's
+  burn forecast averages over an hour and would notice far too late.
+- **Meeting mode (Windows):** while you present, share your screen or play
+  full screen, Clawd takes himself off the desktop and holds every toast back;
+  he returns the moment it is over. Windows reports that state itself
+  (`SHQueryUserNotificationState`), so nothing has to be configured. On by
+  default, switchable in the tray menu.
 - **Self-calibrating:** Anthropic does not publish the actual token quotas, so
   right-click → "Calibrate limit …" and type the percentage Claude's own `/usage`
   popup shows once — the app derives your real budget from it, stores it, and

@@ -225,6 +225,8 @@ class UsageSnapshot:
     source: str = "logs"                          # always "logs" — the only source
     cost_usd: float = 0.0                         # real window cost, if telemetry runs
     cost_live: bool = False                       # True while telemetry is feeding us
+    ctx_tokens: int = 0                           # context fill of the live session
+    ctx_limit: int = 0                            # inferred context tier of that session
     by_model: dict = field(default_factory=dict)  # model id -> input+output tokens
     newest_file: str = ""                         # most recently written session log
     week_total: int = 0                           # input+output in the weekly window
@@ -527,6 +529,25 @@ def scan_usage(now: Optional[datetime] = None, should_stop=None) -> UsageSnapsho
         snap.weighted += w
         snap.by_model[name] = snap.by_model.get(name, 0) + inp + out
         snap.by_model_weighted[name] = snap.by_model_weighted.get(name, 0.0) + w
+
+    # How full the live session's context window is: the newest request shows
+    # what was actually sent to the model. A different budget from the 5-hour
+    # quota — it never blocks you, it quietly degrades answers and then forces a
+    # compaction, which is why it gets its own bar.
+    if snap.newest_file:
+        newest_entry = None
+        ctx_max = 0
+        for entry in _parse_file_entries(Path(snap.newest_file)):
+            if entry[4] > now + timedelta(minutes=5):
+                continue                # ignore clock-skewed rows, as above
+            ctx_max = max(ctx_max, entry[0] + entry[2] + entry[3])
+            if newest_entry is None or entry[4] > newest_entry[4]:
+                newest_entry = entry
+        if newest_entry is not None:    # input + cache_read + cache_creation
+            snap.ctx_tokens = newest_entry[0] + newest_entry[2] + newest_entry[3]
+            # the biggest context this session ever reached without compacting
+            # is hard evidence of which tier it runs in
+            snap.ctx_limit = context_limit(ctx_max)
 
     snap.total = snap.input_tokens + snap.output_tokens
     budget = effective_max_tokens()
@@ -887,6 +908,19 @@ def unregister_hooks(settings_path: Path) -> bool:
 # JSON to /v1/metrics and /v1/logs. The payload also carries user.email, account
 # ids and prompt text; Clawd reads only the few numbers it needs, keeps them in
 # memory, and never writes any of it to disk.
+
+# Context window of one session. The size depends on model and plan (200 k, 500 k
+# and 1 M all exist), and no log field states it — so guessing one number turns a
+# 1 M session into a permanent red "100 %". Instead pick the smallest known tier
+# that still contains the largest context this session has actually reached.
+CONTEXT_TIERS = (200_000, 500_000, 1_000_000)
+
+
+def context_limit(observed_max: int) -> int:
+    for tier in CONTEXT_TIERS:
+        if observed_max <= tier * 0.98:     # leave room for the final request
+            return tier
+    return CONTEXT_TIERS[-1]
 
 OTLP_HOST = "127.0.0.1"           # localhost only — never a public interface
 OTLP_PORT = 4318                  # the OTLP/HTTP default port
@@ -1619,6 +1653,8 @@ STRINGS = {
         "menu_otlp_on": "Echte Kosten aktivieren (Telemetrie)",
         "menu_otlp_off": "Telemetrie deaktivieren",
         "detail_cost": "Kosten: {usd} (gemessen)",
+        "row_context": "Kontextfenster",
+        "ctx_left": "noch {n} Tokens bis Auto-Compact",
         "otlp_title": "Claude-Code-Telemetrie",
         "otlp_ask": "Claude Code kann seine eigene Telemetrie an Clawd senden. "
                     "Dann zeigt Clawd die <b>echten Kosten in USD</b> statt einer "
@@ -1732,6 +1768,8 @@ STRINGS = {
         "menu_otlp_on": "Enable real costs (telemetry)",
         "menu_otlp_off": "Disable telemetry",
         "detail_cost": "Cost: {usd} (measured)",
+        "row_context": "Context window",
+        "ctx_left": "{n} tokens until auto-compact",
         "otlp_title": "Claude Code telemetry",
         "otlp_ask": "Claude Code can send its own telemetry to Clawd, which then "
                     "shows the <b>real cost in USD</b> instead of an estimate."
@@ -2860,6 +2898,17 @@ class PanelWidget(QWidget):
             self._animate_row(row, snap.pct)
             row["pct"].setText(fmt_pct_de(snap.pct))
             keys = {"estimate"}
+
+            # the session's context window — a separate budget from the quota
+            if snap.ctx_tokens > 0 and snap.ctx_limit > 0:
+                ctx = self._ensure_row("context", tr("row_context"))
+                ctx_pct = min(100.0, snap.ctx_tokens / snap.ctx_limit * 100.0)
+                self._animate_row(ctx, ctx_pct)
+                ctx["pct"].setText(fmt_pct_de(ctx_pct))
+                ctx["reset"].setText(tr(
+                    "ctx_left",
+                    n=fmt_de(max(0, snap.ctx_limit - snap.ctx_tokens))))
+                keys.add("context")
 
             # per-model breakdown of the same 5-hour window (Fable, Opus, …)
             budget = effective_max_tokens()

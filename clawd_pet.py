@@ -916,6 +916,19 @@ def unregister_hooks(settings_path: Path) -> bool:
 CONTEXT_TIERS = (200_000, 500_000, 1_000_000)
 
 
+# A reading at the top of the scale carries no information: at 100 % the real
+# budget could be anything at or above what we counted, and dividing by it pins
+# the bar to 100 % forever — which is exactly how a wrong Opus row was produced.
+CAL_SATURATED_PCT = 99.5
+
+
+def budget_from_pct(weighted: float, pct: float) -> Optional[int]:
+    """Derive a budget from "you are at pct % of it", or None if it cannot."""
+    if weighted <= 0 or pct <= 0 or pct >= CAL_SATURATED_PCT:
+        return None
+    return int(round(weighted / (pct / 100.0)))
+
+
 def context_limit(observed_max: int) -> int:
     for tier in CONTEXT_TIERS:
         if observed_max <= tier * 0.98:     # leave room for the final request
@@ -1656,6 +1669,9 @@ STRINGS = {
         "cal_week_text": "Und wie viel Prozent zeigt /usage beim Wochenlimit\n"
                          "(alle Modelle)?",
         "cal_stale": "Kalibrierung veraltet – im Tray-Menü neu kalibrieren",
+        "cal_saturated": "Bei {p} ist der Wert am Anschlag – daraus lässt sich "
+                         "kein Budget berechnen (er sagt nur „mindestens so "
+                         "viel“). Kalibriere, sobald der Wert unter 99 % liegt.",
         "row_context": "Kontextfenster",
         "ctx_left": "noch {n} Tokens bis Auto-Compact",
         "otlp_title": "Claude-Code-Telemetrie",
@@ -1774,6 +1790,9 @@ STRINGS = {
         "cal_week_text": "And what percentage does /usage show for the weekly\n"
                          "limit (all models)?",
         "cal_stale": "Calibration is stale – recalibrate via the tray menu",
+        "cal_saturated": "At {p} the reading is maxed out, so no budget can be "
+                         "derived from it (it only says \"at least this much\"). "
+                         "Calibrate once the value is below 99 %.",
         "row_context": "Context window",
         "ctx_left": "{n} tokens until auto-compact",
         "otlp_title": "Claude Code telemetry",
@@ -3794,7 +3813,11 @@ class ClawdApp:
         if not ok:
             return
 
-        budget = int(round(snap.weighted / (pct / 100.0)))
+        budget = budget_from_pct(snap.weighted, pct)
+        if budget is None:
+            QMessageBox.warning(None, tr("cal_prompt_title"),
+                                tr("cal_saturated", p=fmt_pct_de(pct)))
+            return
         self.settings.setValue("max_tokens", budget)
         set_max_tokens_override(budget)
 
@@ -3804,8 +3827,11 @@ class ClawdApp:
             wpct, ok = QInputDialog.getDouble(
                 None, tr("cal_prompt_title"), tr("cal_week_text"),
                 value=50.0, min=0.5, max=100.0, decimals=1)
-            if ok:
-                wbudget = int(round(snap.week_weighted / (wpct / 100.0)))
+            wbudget = budget_from_pct(snap.week_weighted, wpct) if ok else None
+            if ok and wbudget is None:
+                QMessageBox.warning(None, tr("cal_prompt_title"),
+                                    tr("cal_saturated", p=fmt_pct_de(wpct)))
+            elif wbudget is not None:
                 self.settings.setValue("weekly_budget_all", wbudget)
                 set_auto_calibration(weekly_budget=wbudget)
 

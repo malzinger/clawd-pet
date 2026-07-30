@@ -83,10 +83,11 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
   prompt text; Clawd reads only the numbers it needs and never stores any of it.
 - **Which project ate the budget:** when more than one project ran inside the
   window, the panel breaks out the biggest three by name with their tokens and
-  cost. Every window and week also carries an **estimated price in USD** at
-  Anthropic's public API rates (`≈ $12.40 (API list price)`) — what the same
-  work would have cost without a subscription. Enable telemetry and the
-  estimate is replaced by the measured figure.
+  cost. Every window and week also carries an **estimated price in USD**
+  (`≈ $12.40 (estimated)`), scaled from the same per-model weights — on a real
+  17-million-token session it landed within 1 % of the cost Claude Code itself
+  reported. Enable telemetry and the estimate is replaced by the measured
+  figure.
 - **Runaway warning:** if more than 8 % of the 5-hour budget disappears within
   five minutes — an agent stuck in a loop, a batch job gone wild — a tray
   toast says so and names the minute the budget would be gone. The panel's

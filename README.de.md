@@ -88,9 +88,10 @@ python -m PyInstaller --onefile --windowed --name ClawdPet --icon "docs/clawd.ic
 - **Wer hat das Budget verbraucht:** Lief im Fenster mehr als ein Projekt,
   schlüsselt das Panel die drei größten namentlich auf — mit Tokens und
   Kosten. Zu jedem Fenster und jeder Woche steht außerdem ein **geschätzter
-  Preis in USD** zu Anthropics öffentlichen API-Tarifen (`≈ $12,40
-  (API-Listenpreis)`) — also das, was dieselbe Arbeit ohne Abo gekostet hätte.
-  Mit aktivierter Telemetrie ersetzt der gemessene Wert die Schätzung.
+  Preis in USD** (`≈ $12,40 (geschätzt)`), hochgerechnet aus denselben
+  Modellgewichten — bei einer echten Session über 17 Millionen Tokens lag er
+  auf 1 % an dem Wert, den Claude Code selbst gemeldet hat. Mit aktivierter
+  Telemetrie ersetzt der gemessene Wert die Schätzung.
 - **Runaway-Warnung:** Verschwinden mehr als 8 % des 5-Stunden-Budgets
   innerhalb von fünf Minuten — ein Agent in der Schleife, ein entgleister
   Batch-Lauf —, sagt das ein Tray-Hinweis und nennt die Minute, in der das

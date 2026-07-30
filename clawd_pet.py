@@ -192,7 +192,7 @@ HOOK_EVENTS = ["PreToolUse", "Notification", "Stop", "SessionStart"]
 
 ORG_NAME = "ClawdPet"
 APP_NAME = "Clawd"
-APP_VERSION = "1.11.0"
+APP_VERSION = "1.11.1"
 
 # --- Burn-rate forecast + threshold notifications ----------------------------
 BURN_LOOKBACK_S = 3600      # forecast fits over at most the last hour

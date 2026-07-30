@@ -129,18 +129,27 @@ WEIGHT_CACHE_CREATION = 1.25
 WEIGHT_CACHE_READ = 0.1
 
 # Models also cost very differently against the plan. These multipliers mirror
-# the public per-token price tiers (relative to Sonnet), so the estimate tracks
-# Claude's percentage across changing model mixes — one calibration then holds
-# whether you code with Opus or Fable, instead of drifting every window.
-MODEL_COST = {"Opus": 5.0, "Sonnet": 1.0, "Haiku": 0.3, "Fable": 0.3}
+# the public per-token price tiers, so the estimate tracks Claude's percentage
+# across changing model mixes — one calibration then holds whether you code
+# with Opus or Fable, instead of drifting every window.
+# Fable is Anthropic's most capable model and costs twice what Opus does
+# ($10/$50 per million tokens vs $5/$25) — it is the top tier, not a cheap one,
+# which is also why it gets a weekly limit of its own (see WEEKLY_LIMIT_MODEL).
+MODEL_COST = {"Fable": 10.0, "Opus": 5.0, "Sonnet": 1.0, "Haiku": 0.3}
+
+# The model Anthropic caps separately on top of the all-models weekly limit —
+# the one Claude's own /usage names in its per-model weekly row.
+WEEKLY_LIMIT_MODEL = "Fable"
+
 WEIGHT_VERSION = 2      # bump to drop stale calibrations after changing the weights
 
-# Price of one weighted unit. The weights above ARE Sonnet's public API prices
-# in disguise (input 1 = $3/Mtok, output 5 = $15, cache write 1.25 = $3.75,
-# cache read 0.1 = $0.30), and MODEL_COST scales the other tiers from there —
-# so the weighted sum turns into dollars with a single multiplication. This is
-# an estimate at list prices, not what a subscription actually bills; the
-# measured figure comes from Claude Code's own telemetry when it is enabled.
+# Price of one weighted unit, so the weighted sum turns into dollars with a
+# single multiplication. The weight ratios are the public API price ratios, and
+# this factor is anchored empirically: on a real 17.1M-token Opus session it
+# reproduced the cost Claude Code itself reported ($32.84 vs $32.59, 0.8% off).
+# It stays an estimate — it is not what a subscription bills, and sessions that
+# never grow past the small context tier are likely overstated. The measured
+# figure comes from Claude Code's own telemetry when that is enabled.
 USD_PER_WEIGHTED = 3.0 / 1_000_000
 
 
@@ -1815,7 +1824,7 @@ STRINGS = {
         "menu_otlp_off": "Telemetrie deaktivieren",
         "menu_meeting": "Meeting-Modus (bei Präsentation ausblenden)",
         "detail_cost": "Kosten: {usd} (gemessen)",
-        "detail_cost_est": "Kosten: ≈ {usd} (API-Listenpreis)",
+        "detail_cost_est": "Kosten: ≈ {usd} (geschätzt)",
         "proj_cost": "{n} Tokens  ·  ≈ {usd}",
         "notify_runaway_title": "Ungewöhnlich hoher Verbrauch",
         "notify_runaway_text": "In den letzten 5 Minuten sind {p} deines "
@@ -1823,6 +1832,8 @@ STRINGS = {
                                "{n} Min. leer.",
         "cal_week_text": "Und wie viel Prozent zeigt /usage beim Wochenlimit\n"
                          "(alle Modelle)?",
+        "cal_week_model_text": "Und wie viel Prozent zeigt /usage in der Zeile\n"
+                               "„Wöchentlich · {name}\"?",
         "cal_stale": "Kalibrierung veraltet – im Tray-Menü neu kalibrieren",
         "cal_saturated": "Bei {p} ist der Wert am Anschlag – daraus lässt sich "
                          "kein Budget berechnen (er sagt nur „mindestens so "
@@ -1943,13 +1954,15 @@ STRINGS = {
         "menu_otlp_off": "Disable telemetry",
         "menu_meeting": "Meeting mode (hide while presenting)",
         "detail_cost": "Cost: {usd} (measured)",
-        "detail_cost_est": "Cost: ≈ {usd} (API list price)",
+        "detail_cost_est": "Cost: ≈ {usd} (estimated)",
         "proj_cost": "{n} tokens  ·  ≈ {usd}",
         "notify_runaway_title": "Unusually fast burn",
         "notify_runaway_text": "{p} of your 5-hour budget went in the last "
                                "5 minutes. At that pace it is empty in {n} min.",
         "cal_week_text": "And what percentage does /usage show for the weekly\n"
                          "limit (all models)?",
+        "cal_week_model_text": "And what percentage does /usage show in its\n"
+                               "\"Weekly · {name}\" row?",
         "cal_stale": "Calibration is stale – recalibrate via the tray menu",
         "cal_saturated": "At {p} the reading is maxed out, so no budget can be "
                          "derived from it (it only says \"at least this much\"). "
@@ -3147,7 +3160,14 @@ class PanelWidget(QWidget):
                     wtext = tr("cal_stale")
             wk["reset"].setText(wtext)
             keys.add("week_all")
-            for name, mb in weekly_model_budgets().items():
+            # Anthropic's own /usage lists the separately capped model as its
+            # own weekly row even at 0 %, so Clawd shows it unconditionally —
+            # "you have not touched the expensive model this week" is exactly
+            # the thing you want to read there.
+            mbudgets = weekly_model_budgets()
+            unbudgeted = []
+            for name in dict.fromkeys([WEEKLY_LIMIT_MODEL, *mbudgets]):
+                mb = mbudgets.get(name, 0)
                 tokens = snap.week_by_model.get(name, 0)
                 wtok = snap.week_by_model_weighted.get(name, 0.0)
                 mkey = f"week:{name}"
@@ -3155,12 +3175,16 @@ class PanelWidget(QWidget):
                 self._animate_row(mrow, wtok / mb * 100.0 if mb else 0.0)
                 mrow["reset"].setText(tr("tokens_n", n=fmt_de(tokens)) + wtail)
                 keys.add(mkey)
+                if not mb:
+                    unbudgeted.append(mkey)
             self._show_only(keys)
+            # no learned budget yet: show only the token count, not a percentage
+            # bar that can never fill
             if not wbudget:
-                # no learned weekly budget yet: show only the token count, not a
-                # percentage bar that can never fill
-                self._rows["week_all"]["pct"].setVisible(False)
-                self._rows["week_all"]["bar"].setVisible(False)
+                unbudgeted.append("week_all")
+            for mkey in unbudgeted:
+                self._rows[mkey]["pct"].setVisible(False)
+                self._rows[mkey]["bar"].setVisible(False)
 
             hint = (tr("hint_manual") if is_calibrated()
                     else tr("hint_auto") if auto_budget_active()
@@ -4087,6 +4111,27 @@ class ClawdApp:
                 self.settings.setValue("weekly_budget_all", wbudget)
                 set_auto_calibration(weekly_budget=wbudget)
 
+        # Anthropic caps its most expensive model separately on top of the
+        # all-models weekly limit, and /usage shows it as its own row — Clawd
+        # can only mirror that row if you type its percentage in as well. Only
+        # worth asking when the week actually contains usage of that model.
+        mweighted = snap.week_by_model_weighted.get(WEEKLY_LIMIT_MODEL, 0.0)
+        if mweighted > 0:
+            mpct, ok = QInputDialog.getDouble(
+                None, tr("cal_prompt_title"),
+                tr("cal_week_model_text", name=WEEKLY_LIMIT_MODEL),
+                value=50.0, min=0.5, max=100.0, decimals=1)
+            mbudget = budget_from_pct(mweighted, mpct) if ok else None
+            if ok and mbudget is None:
+                QMessageBox.warning(None, tr("cal_prompt_title"),
+                                    tr("cal_saturated", p=fmt_pct_de(mpct)))
+            elif mbudget is not None:
+                budgets = weekly_model_budgets()
+                budgets[WEEKLY_LIMIT_MODEL] = mbudget
+                self.settings.setValue("weekly_budget_models",
+                                       json.dumps(budgets))
+                set_auto_calibration(weekly_model_budgets=budgets)
+
         self._rebuild_tray_menu()
         QMessageBox.information(
             None, tr("cal_done_title"), tr("cal_done_text", n=fmt_de(budget)))
@@ -4242,9 +4287,18 @@ def run_selftest() -> int:
     print(f"[selftest] weekly window OK, week_total={panel._snap.week_total} "
           f"week_by_model={panel._snap.week_by_model}")
 
-    # per-model cost weighting: pricier models count more against the plan
-    assert model_cost("Opus") == 5.0 and model_cost("Fable") == 0.3
-    assert model_cost("Sonnet") == 1.0 and model_cost("Made-Up-Model") == 1.0
+    # per-model cost weighting: pricier models count more against the plan.
+    # Fable is Anthropic's most capable and most expensive model ($10/$50 per
+    # million vs Opus's $5/$25) — weighting it below Opus, as an early version
+    # did, silently under-counts the priciest tokens you can spend.
+    assert (model_cost("Fable") > model_cost("Opus") > model_cost("Sonnet")
+            > model_cost("Haiku")), MODEL_COST
+    assert model_cost("Made-Up-Model") == 1.0
+    # the separately capped weekly model must be one we can actually weigh, and
+    # the calibration dialog must be able to ask about it by name
+    assert WEEKLY_LIMIT_MODEL in MODEL_COST, WEEKLY_LIMIT_MODEL
+    assert WEEKLY_LIMIT_MODEL in tr("cal_week_model_text",
+                                    name=WEEKLY_LIMIT_MODEL)
     # regression: the placeholder budget must be on the cost-weighted scale, so
     # a typical heavy all-Opus 5h window does not read a false >100% "limit"
     typical_opus_weighted = 24_000_000        # ~ observed heavy all-Opus window
@@ -4262,6 +4316,17 @@ def run_selftest() -> int:
     assert panel._rows["week_all"]["bar"].isHidden(), "empty weekly bar still shown"
     assert panel._rows["week_all"]["pct"].isHidden(), "dash percentage still shown"
     assert panel._rows["week_all"]["reset"].text(), "weekly token count missing"
+    # the separately capped model gets its row even with nothing to show for it,
+    # mirroring /usage — but no bar until its budget is actually known
+    mkey = f"week:{WEEKLY_LIMIT_MODEL}"
+    assert mkey in panel._rows, f"{WEEKLY_LIMIT_MODEL} weekly row missing"
+    assert panel._rows[mkey]["reset"].text(), "per-model token count missing"
+    assert panel._rows[mkey]["bar"].isHidden(), "uncalibrated per-model bar shown"
+    set_auto_calibration(weekly_model_budgets={WEEKLY_LIMIT_MODEL: 500_000})
+    panel.update_snapshot(nb)
+    app.processEvents()
+    assert not panel._rows[mkey]["bar"].isHidden(), "calibrated per-model bar hidden"
+    reset_auto_calibration()
     print("[selftest] model cost + weekly-bar-when-unbudgeted OK")
 
     # fixed-window replay: chained windows and fresh starts after silence
